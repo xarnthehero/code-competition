@@ -104,7 +104,7 @@ class Player {
             for (Direction direction : Direction.values()) {
                 Entity currentTile = from.entityInDirection(direction);
                 while (currentTile != null && !currentTile.getType().equals(EntityType.WALL)) {
-                    if (currentTile.isEmpty() || currentTile.getType().isProtein()) {
+                    if (currentTile.isBuildable()) {
                         possibleSpawn.add(currentTile);
                     }
                     currentTile = currentTile.entityInDirection(direction);
@@ -306,7 +306,7 @@ class Player {
         public Stream<Entity> entitiesInFront() {
             List<Entity> entities = new ArrayList<>();
             Entity currentEntity = this.entityInDirection(direction);
-            while (currentEntity != null) {
+            while (currentEntity != null && !currentEntity.getType().equals(EntityType.WALL)) {
                 entities.add(currentEntity);
                 currentEntity = currentEntity.entityInDirection(direction);
             }
@@ -315,6 +315,10 @@ class Player {
 
         public boolean isEmpty() {
             return type.equals(Player.EntityType.EMPTY);
+        }
+
+        public boolean isBuildable() {
+            return isEmpty() || type.isProtein();
         }
 
         public boolean isAdjacentTo(Predicate<Entity> predicate) {
@@ -357,7 +361,7 @@ class Player {
                 return null;
             }
             AttackTuple ggNoob = possibleAttacks.stream().max(Comparator.comparingInt(attackTuple -> attackTuple.enemy().descendentCount())).get();
-            return new GrowCommand(ggNoob.mine(), ggNoob.emptySpace(), EntityType.TENTACLE, ggNoob.emptySpace().directionTo(ggNoob.enemy()));
+            return new GrowCommand(ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.enemy()));
         }
 
         public String toString() {
@@ -437,29 +441,23 @@ class Player {
     private class ConsumeProteinBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            Predicate<Entity> myTileWIthRootId = entity -> entity.mine() && entity.getRootId() == rootId;
-            Stream<Player.EntityType> proteinStream = Stream.of(Player.EntityType.A, Player.EntityType.B, Player.EntityType.C, Player.EntityType.D);
-            Player.Entity buildOnProtein = proteinStream
-                    .filter(entityType -> Player.this.getProteinCount(entityType) == 0)
-                    .map(entityType -> grid.getEntitySet().stream()
-                            .filter(entity -> entity.getType().equals(entityType))
-                            .filter(myTileWIthRootId)
-                            .map(entity -> entity.neighborsStream().filter(myTileWIthRootId).findFirst().orElseThrow())
-                            .findAny()
-                            .orElse(null)
-                    ).filter(Objects::nonNull)
-                    .findAny()
-                    .orElse(null);
-            if (buildOnProtein == null) {
-                return null;
-            }
             Player.EntityType buildType = getBuildableType();
             if (buildType == null) {
                 debug(this + " Can't afford any proteins");
                 return null;
             }
-            Player.Entity myAdjacentEntity = buildOnProtein.myNeighbor(entity -> entity.getRootId() == rootId);
-            return new Player.GrowCommand(myAdjacentEntity, buildOnProtein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myAdjacentEntity.directionTo(buildOnProtein));
+            for(EntityType proteinType : Arrays.asList(Player.EntityType.A, Player.EntityType.B, Player.EntityType.C, Player.EntityType.D)) {
+                if(Player.this.getProteinCount(proteinType) != 0) {
+                    continue;
+                }
+                for(Entity protein : grid.getEntitySet().stream().filter(entity -> entity.getType().equals(proteinType)).toList()) {
+                    Entity myNeighbor = protein.myNeighbor();
+                    if(myNeighbor != null) {
+                        return new Player.GrowCommand(myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein));
+                    }
+                }
+            }
+            return null;
         }
 
         public String toString() {
@@ -621,15 +619,15 @@ class Player {
                 .orElse(null);
     }
 
-    private record AttackTuple(Entity mine, Entity emptySpace, Entity enemy) {
+    private record AttackTuple(Entity mine, Entity buildableTile, Entity enemy) {
     }
 
     private List<AttackTuple> getPossibleAttacks(int rootId) {
-        List<Entity> emptyTiles = grid.adjacentToMine(rootId)
-                .filter(Entity::isEmpty)
+        List<Entity> buildableTiles = grid.adjacentToMine(rootId)
+                .filter(Entity::isBuildable)
                 .distinct().toList();
         List<AttackTuple> tuples = new ArrayList<>();
-        for (Entity emptyTile : emptyTiles) {
+        for (Entity emptyTile : buildableTiles) {
             emptyTile.neighborsStream().filter(Entity::enemy).forEach(enemy -> {
                 tuples.add(new AttackTuple(emptyTile.myNeighbor(), emptyTile, enemy));
             });
