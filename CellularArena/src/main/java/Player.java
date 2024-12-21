@@ -10,6 +10,7 @@ class Player {
 
     private Grid grid;
     private HashMap<Integer, Entity> entitiesById = new HashMap<>();
+    private HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
     private Entity myRoot;
     private List<Entity> myRoots = new ArrayList<>();
     private Entity enemyRoot;
@@ -26,6 +27,14 @@ class Player {
     private final List<Behavior> behaviors = new ArrayList<>();
 
     private Random random = new Random();
+
+    public HashMap<Integer, List<Entity>> getRootIdToDescendents() {
+        return rootIdToDescendents;
+    }
+
+    public void setRootIdToDescendents(HashMap<Integer, List<Entity>> rootIdToDescendents) {
+        this.rootIdToDescendents = rootIdToDescendents;
+    }
 
     private class Grid {
         private final List<List<Entity>> entities;
@@ -144,13 +153,21 @@ class Player {
         private int y;
         private Entity up, down, left, right;
         private EntityType type;
+        private final List<Entity> children;
         private int owner;           // 1 for me, 2 for enemy, 0 for no one
         private Direction direction;
 
         public Entity(int x, int y) {
             this.x = x;
             this.y = y;
+            children = new ArrayList<>();
+            reset();
+        }
+
+        public void reset() {
             type = EntityType.EMPTY;
+            children.clear();
+            owner = -1;
         }
 
         public int getId() {
@@ -183,6 +200,10 @@ class Player {
 
         public void setType(EntityType type) {
             this.type = type;
+        }
+
+        public List<Entity> getChildren() {
+            return children;
         }
 
         public int getX() {
@@ -249,12 +270,12 @@ class Player {
             return 1 == owner;
         }
 
-        public boolean enemies() {
-            return -1 == owner;
+        public boolean enemy() {
+            return 0 == owner;
         }
 
         public boolean unowned() {
-            return 0 == owner;
+            return -1 == owner;
         }
 
         public List<Entity> neighbors() {
@@ -263,6 +284,10 @@ class Player {
 
         public Stream<Entity> neighborsStream() {
             return Stream.of(up, down, left, right).filter(Objects::nonNull);
+        }
+
+        public Entity myNeighbor() {
+            return myNeighbor(tile -> true);
         }
 
         public Entity myNeighbor(Predicate<Entity> predicate) {
@@ -304,6 +329,10 @@ class Player {
             return other.getY() - y > 0 ? Player.Direction.S : Player.Direction.N;
         }
 
+        public int descendentCount() {
+            return children.size() + children.stream().mapToInt(Entity::descendentCount).sum();
+        }
+
         @Override
         public String toString() {
             return String.format("[Entity %s,%s  %s]", x, y, type);
@@ -313,6 +342,27 @@ class Player {
     private interface Behavior {
         // Returns null if there isn't a good command for this behavior
         Player.Command getCommand(int rootId);
+    }
+
+    private class AttackBehavior implements Behavior {
+        @Override
+        public Command getCommand(int rootId) {
+            if (!canBuild(EntityType.TENTACLE)) {
+                return null;
+            }
+            List<AttackTuple> possibleAttacks = getPossibleAttacks(rootId);
+            debug("Possible attacks: " + possibleAttacks.size());
+            debug(possibleAttacks.toString());
+            if (possibleAttacks.isEmpty()) {
+                return null;
+            }
+            AttackTuple ggNoob = possibleAttacks.stream().max(Comparator.comparingInt(attackTuple -> attackTuple.enemy().descendentCount())).get();
+            return new GrowCommand(ggNoob.mine(), ggNoob.emptySpace(), EntityType.TENTACLE, ggNoob.emptySpace().directionTo(ggNoob.enemy()));
+        }
+
+        public String toString() {
+            return "[Attack Behavior]";
+        }
     }
 
     /**
@@ -481,7 +531,7 @@ class Player {
         void updateState();
     }
 
-    private static class WaitCommand implements Player.Command {
+    private record WaitCommand() implements Player.Command {
         @Override
         public String getText() {
             return "WAIT";
@@ -571,6 +621,22 @@ class Player {
                 .orElse(null);
     }
 
+    private record AttackTuple(Entity mine, Entity emptySpace, Entity enemy) {
+    }
+
+    private List<AttackTuple> getPossibleAttacks(int rootId) {
+        List<Entity> emptyTiles = grid.adjacentToMine(rootId)
+                .filter(Entity::isEmpty)
+                .distinct().toList();
+        List<AttackTuple> tuples = new ArrayList<>();
+        for (Entity emptyTile : emptyTiles) {
+            emptyTile.neighborsStream().filter(Entity::enemy).forEach(enemy -> {
+                tuples.add(new AttackTuple(emptyTile.myNeighbor(), emptyTile, enemy));
+            });
+        }
+        return tuples;
+    }
+
     private boolean canBuild(EntityType type) {
         return switch (type) {
             case BASIC -> myA > 0;
@@ -640,12 +706,21 @@ class Player {
 
     private List<Behavior> bronzeLeague() {
         return Arrays.asList(new Behavior[]{
+                new AttackBehavior(),
                 new CreateSporerBehavior(),
                 new CreateNewRootBehavior(),
                 new ConsumeProteinBehavior(),
                 new BuildHarvesterBehavior(),
                 new FillRandomSpaceBehavior(),
         });
+    }
+
+    private void newTurn() {
+        turn++;
+        myRoots.clear();
+        entitiesById.clear();
+        rootIdToDescendents.clear();
+        grid.getEntitySet().forEach(Entity::reset);
     }
 
     private void start() {
@@ -657,9 +732,7 @@ class Player {
 
         // game loop
         while (true) {
-            turn++;
-            myRoots.clear();
-            entitiesById.clear();
+            newTurn();
             int entityCount = in.nextInt();
             debug("Start of turn " + turn);
             for (int i = 0; i < entityCount; i++) {
@@ -679,14 +752,17 @@ class Player {
                     }
                 }
                 entity.setId(in.nextInt()); // id of this entity if it's an organ, 0 otherwise
-                entitiesById.put(entity.getId(), entity);
                 String organDir = in.next(); // N,E,S,W or X if not an organ
                 if (!"X".equals(organDir)) {
                     entity.setDirection(Direction.valueOf(organDir));
                 }
                 entity.setParentId(in.nextInt());
                 entity.setRootId(in.nextInt());
+                entitiesById.put(entity.getId(), entity);
+                rootIdToDescendents.computeIfAbsent(entity.getRootId(), k -> new ArrayList<>()).add(entity);
             }
+            // Give parents their children
+            entitiesById.values().forEach(entity -> entitiesById.get(entity.getParentId()).getChildren().add(entity));
             myA = in.nextInt();
             myB = in.nextInt();
             myC = in.nextInt();
