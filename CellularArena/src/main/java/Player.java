@@ -152,6 +152,9 @@ class Player {
                 && entity.myNeighbor(myNeighbor ->
                 myNeighbor.getType().equals(EntityType.HARVESTER)
                         && myNeighbor.directionTo(entity).equals(myNeighbor.getDirection())) != null;
+        public static final Predicate<Entity> SHOOT_ROOT_OVER = entity -> entity.getType().isProtein() || entity.getType().equals(EntityType.EMPTY);
+        public static final Predicate<Entity> ENEMY_ATTACKING = entity -> entity.neighborsStream()
+                .anyMatch(enemy -> enemy.enemy() && enemy.getType().equals(EntityType.TENTACLE) && enemy.entityInFront() == entity);
     }
 
     private class Entity {
@@ -310,10 +313,17 @@ class Player {
             };
         }
 
+        public Entity entityInFront() {
+            if(direction == null) {
+                return null;
+            }
+            return entityInDirection(direction);
+        }
+
         public Stream<Entity> entitiesInFront() {
             List<Entity> entities = new ArrayList<>();
             Entity currentEntity = this.entityInDirection(direction);
-            while (currentEntity != null && !currentEntity.getType().equals(EntityType.WALL)) {
+            while (currentEntity != null && EntityPredicates.SHOOT_ROOT_OVER.test(currentEntity)) {
                 entities.add(currentEntity);
                 currentEntity = currentEntity.entityInDirection(direction);
             }
@@ -357,9 +367,8 @@ class Player {
             if (!canBuild(EntityType.TENTACLE)) {
                 return null;
             }
-            List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy);
-            debug("Possible attacks: " + possibleAttacks.size());
-            debug(possibleAttacks.toString());
+            List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy)
+                    .stream().filter(buildEntityTuple -> !EntityPredicates.ENEMY_ATTACKING.test(buildEntityTuple.buildableTile())).toList();
             if (possibleAttacks.isEmpty()) {
                 return null;
             }
@@ -422,7 +431,7 @@ class Player {
                     .filter(entity -> entity.getRootId() == rootId)
                     .findFirst()
                     .orElse(null);
-            if (sporer == null || sporer.entitiesInFront().anyMatch(entity -> entity.getType().equals(Player.EntityType.ROOT) && entity.mine())) {
+            if (sporer == null) {
                 // There is no sporer OR we have already made new root in that direction
                 return null;
             }
@@ -479,7 +488,11 @@ class Player {
             if (possibleHarvesterBuilds.isEmpty()) {
                 return null;
             }
-            BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(Comparator.comparingInt(value -> getProteinCount(value.target().getType()))).get();
+            // Prioritize not building on something we are harvesting, then what is low on protein count.
+            Comparator<BuildEntityTuple> notHarvestingComparator = Comparator.comparingInt(value -> EntityPredicates.HARVESTED_BY_ME.test(value.buildableTile()) ? 1 : 0);
+            BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(
+                    notHarvestingComparator.thenComparingInt(value -> getProteinCount(value.target().getType()))
+            ).get();
             return new GrowCommand(harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()));
         }
 
@@ -585,8 +598,6 @@ class Player {
                 if (command != null) {
                     debug("Current behavior: " + behavior);
                     break;
-                } else {
-                    debug("Behavior returned no command - " + behavior);
                 }
             }
             if (command == null) {
@@ -663,6 +674,7 @@ class Player {
     private Entity findBestNewRootLocation(Entity sporer) {
         return sporer.entitiesInFront()
                 .filter(Entity::isEmpty)
+                .filter(entity -> entity.myNeighbor() == null)
                 .max(distanceToComparator(sporer))
                 .orElse(null);
     }
