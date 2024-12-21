@@ -1,6 +1,5 @@
 import java.util.*;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -24,23 +23,25 @@ class Player {
     private int enemyD;
     private HashMap<Entity, Integer> distanceToMyRoot;
     private int turn = 0;
-    private List<List<Goal>> goals;
+    private final List<Behavior> behaviors = new ArrayList<>();
+
+    private Random random = new Random();
 
     private class Grid {
-        private final List<List<Entity>> entitys;
-        private final Set<Entity> allEntities;
+        private final List<List<Entity>> entities;
+        private final Set<Entity> entitySet;
         private final int width, height;
 
         public Grid(int width, int height) {
             this.width = width;
             this.height = height;
-            this.entitys = new ArrayList<>(height);
+            this.entities = new ArrayList<>(height);
             for(int y = 0; y < height; y++) {
                 List<Entity> row = new ArrayList<>(width);
                 for(int x = 0; x < width; x++) {
                     row.add(new Entity(x, y));
                 }
-                entitys.add(row);
+                entities.add(row);
             }
             for(int y = 0; y < height; y++) {
                 for(int x = 0; x < width; x++) {
@@ -57,33 +58,40 @@ class Player {
                     }
                 }
             }
-            allEntities = entitys.stream().flatMap(Collection::stream).collect(Collectors.toSet());
+            entitySet = entities.stream().flatMap(Collection::stream).collect(Collectors.toSet());
         }
 
-        public Set<Entity> getAllEntities() {
-            return allEntities;
+        public Set<Entity> getEntitySet() {
+            return entitySet;
         }
 
         public Set<Entity> myEntitys() {
-            return allEntities.stream().filter(Entity::mine).collect(Collectors.toSet());
+            return entitySet.stream().filter(Entity::mine).collect(Collectors.toSet());
         }
 
         public Entity entityAt(int x, int y) {
             if(x >= 0 && x < width && y >= 0 && y < height) {
-                return entitys.get(y).get(x);
+                return entities.get(y).get(x);
             }
             return null;
         }
 
         public Entity closestToRoot(Predicate<Entity> predicate) {
-            return allEntities.stream().filter(predicate).min(Comparator.comparing(entity -> distanceToMyRoot.get(entity))).orElse(null);
+            return entitySet.stream().filter(predicate).min(Comparator.comparing(entity -> distanceToMyRoot.get(entity))).orElse(null);
         }
 
-        public Stream<Entity> adjacentToMine() {
+        public Stream<Entity> adjacentToMine(int rootId) {
             return myEntitys().stream()
+                    .filter(entity -> entity.getRootId() == rootId)
                     .flatMap(Entity::neighborsStream)
                     .distinct()
                     .filter(entity -> !entity.mine());
+        }
+
+        public Entity midPoint() {
+            int midY = entities.size() / 2;
+            int midX = entities.get(0).size() / 2;
+            return entityAt(midX, midY);
         }
 
         public static List<Entity> entitysBetween(Entity t1, Entity t2) {
@@ -126,7 +134,7 @@ class Player {
         SPORER(0, 1, 0, 1),
         ROOT(1, 1, 1, 1);
 
-        private int[] cost;
+        private final int[] cost;
 
         EntityType() {
             this(0, 0, 0, 0);
@@ -134,6 +142,11 @@ class Player {
 
         EntityType(int a, int b, int c, int d) {
             this.cost = new int[] {a, b, c, d};
+        }
+
+        private static final List<EntityType> PROTEIN_TYPES = Arrays.asList(A, B, C, D);
+        public boolean isProtein() {
+            return PROTEIN_TYPES.contains(this);
         }
 
         public int[] getCost() {
@@ -268,6 +281,18 @@ class Player {
             return Stream.of(up, down, left, right).filter(Objects::nonNull);
         }
 
+        public Entity myNeighbor(Predicate<Entity> predicate) {
+            return neighborsStream().filter(Entity::mine).filter(predicate).findFirst().orElse(null);
+        }
+
+        public boolean isEmpty() {
+            return type.equals(EntityType.EMPTY);
+        }
+
+        public boolean isAdjacentTo(Predicate<Entity> predicate) {
+            return neighborsStream().anyMatch(predicate);
+        }
+
         public boolean pointedAt(Entity other) {
             if(direction == null) {
                 return false;
@@ -294,98 +319,116 @@ class Player {
         }
     }
 
-    private interface Goal {
-        boolean isComplete();
-        Command nextCommand();
+    private interface Behavior {
+        // Returns null if there isn't a good command for this behavior
+        Command getCommand(int rootId);
     }
 
-    private class BuildOn implements Goal {
-
-        private final Supplier<Entity> fromEntitySupplier;
-        private final Entity target;
-        private final EntityType targetType;
-        private final Direction buildDirection;
-
-        public BuildOn(Supplier<Entity> fromEntitySupplier, Entity target, EntityType targetType, Direction buildDirection) {
-            this.fromEntitySupplier = fromEntitySupplier;
-            this.target = target;
-            this.targetType = targetType;
-            this.buildDirection = buildDirection;
-        }
-
+    private class CreateSporerBehavior implements Behavior {
         @Override
-        public boolean isComplete() {
-            return target.mine();
-        }
-
-        @Override
-        public Command nextCommand() {
-            Entity neighboringOwnedEntity = target.neighborsStream().filter(Entity::mine).findFirst().orElse(null);
-            debug(target.neighbors().toString());
-            debug("[BuildOn] neighboringOwnedEntity=" + neighboringOwnedEntity);
-            if(neighboringOwnedEntity != null) {
-                // Build on target
-                return new GrowCommand(neighboringOwnedEntity, target, targetType, buildDirection);
+        public Command getCommand(int rootId) {
+            if(
+                    canBuild(EntityType.SPORER) &&
+                    grid.myEntitys().stream().noneMatch(entity -> entity.getRootId() == rootId && entity.getType().equals(EntityType.SPORER))
+            ) {
+                // No sporer for this root id, build 1
+                Entity potentialSporer = grid.adjacentToMine(rootId)
+                        .filter(Entity::isEmpty)
+                        .min(distanceToComparator(grid.midPoint()))
+                        .orElse(null);
+                if(potentialSporer != null) {
+                    debug(this + " No tile to spawn sporer");
+                }
+                Entity myEntity = potentialSporer.myNeighbor(entity -> entity.getRootId() == rootId);
+                Direction randomDirection = Direction.values()[random.nextInt(Direction.values().length)];
+                return new GrowCommand(myEntity, potentialSporer, EntityType.SPORER, randomDirection);
             }
-            return new GrowCommand(myRoot, target, EntityType.BASIC, null);
+            return null;
         }
-
         public String toString() {
-            return String.format("[Build %s on %s facing %s, next entity %s]", targetType.name(), target, buildDirection, fromEntitySupplier.get());
+            return "[Create Sporer Behavior]";
         }
     }
 
-    private class BuildWithSpore implements Goal {
-        private final Entity targetEntity;
-        private final EntityType targetType;
-
-        public BuildWithSpore(Entity targetEntity, EntityType targetType) {
-            this.targetEntity = targetEntity;
-            this.targetType = targetType;
-        }
-
+    private class ConsumeProteinBehavior implements Behavior {
         @Override
-        public boolean isComplete() {
-            return targetEntity.getType().equals(targetType);
+        public Command getCommand(int rootId) {
+            Stream<EntityType> proteinStream = Stream.of(EntityType.A, EntityType.B, EntityType.C, EntityType.D);
+            Entity buildOnProtein = proteinStream
+                    .filter(entityType -> Player.this.getProteinCount(entityType) == 0)
+                    .map(entityType -> grid.getEntitySet().stream()
+                            .filter(entity -> entity.getType().equals(entityType))
+                            .filter(entity -> entity.isAdjacentTo(Entity::mine))
+                            .map(entity -> entity.neighborsStream().filter(Entity::mine).findFirst().orElseThrow())
+                            .findAny()
+                            .orElse(null)
+                    ).filter(Objects::nonNull)
+                    .findAny()
+                    .orElse(null);
+            if(buildOnProtein == null) {
+                return null;
+            }
+            EntityType buildType = getBuildableType();
+            if(buildType == null) {
+                debug(this + " Can't afford any proteins");
+                return null;
+            }
+            Entity myAdjacentEntity = buildOnProtein.myNeighbor(entity -> entity.getRootId() == rootId);
+            return new GrowCommand(myAdjacentEntity, buildOnProtein, buildType, buildType.equals(EntityType.BASIC) ? null : myAdjacentEntity.directionTo(buildOnProtein));
         }
+        public String toString() {
+            return "[Consume Protein Behavior]";
+        }
+    }
 
+    private class BuildHarvesterBehavior implements Behavior {
         @Override
-        public Command nextCommand() {
-            Entity sporerPointedAtTarget = grid.myEntitys().stream()
-                    .filter(entity -> entity.getType().equals(EntityType.SPORER))
-                    .filter(entity -> entity.pointedAt(targetEntity))
-                    .filter(entity -> Grid.entitysBetween(entity, targetEntity).stream().allMatch(entity1 -> entity1.getType().equals(EntityType.EMPTY)))
+        public Command getCommand(int rootId) {
+            if(!canBuild(EntityType.HARVESTER)) {
+                return null;
+            }
+            Entity adjacentEmptyEntitiesTouchingProtein = grid
+                    .adjacentToMine(rootId)
+                    .filter(Entity::isEmpty)
+                    .filter(entity -> entity.isAdjacentTo(
+                            protein -> protein.getType().isProtein()
+                                    && !protein.isAdjacentTo(existingHarvester -> existingHarvester.getType().equals(EntityType.HARVESTER) && existingHarvester.mine())))
                     .findFirst()
                     .orElse(null);
-            if(canBuild(targetType) && sporerPointedAtTarget != null) {
-                return new SporeCommand(sporerPointedAtTarget, targetEntity);
+            if(adjacentEmptyEntitiesTouchingProtein == null) {
+                return null;
             }
-            return new WaitCommand();
+            Entity buildOnProtein = adjacentEmptyEntitiesTouchingProtein.neighborsStream()
+                    .filter(entity -> entity.getType().isProtein())
+                    .findFirst()
+                    .orElseThrow();
+            Entity myAdjacentEntity = adjacentEmptyEntitiesTouchingProtein.neighborsStream()
+                    .filter(Entity::mine)
+                    .findFirst()
+                    .orElseThrow();
+            return new GrowCommand(myAdjacentEntity, adjacentEmptyEntitiesTouchingProtein, EntityType.HARVESTER, adjacentEmptyEntitiesTouchingProtein.directionTo(buildOnProtein));
         }
-
         public String toString() {
-            return String.format("[Build %s on %s]", targetType.name(), targetEntity);
+            return "[Build Harvester Behavior]";
         }
     }
 
-    private class FillRandomSpace implements Goal {
+    private class FillRandomSpaceBehavior implements Behavior {
         @Override
-        public boolean isComplete() {
-            return grid.adjacentToMine().noneMatch(tile -> tile.getType().equals(EntityType.EMPTY));
-        }
-
-        @Override
-        public Command nextCommand() {
-            debug("Adjacent to my stuff: " + grid.adjacentToMine().toList().toString());
-            Entity targetEntity = grid.adjacentToMine()
+        public Command getCommand(int rootId) {
+            Entity targetEntity = grid.adjacentToMine(rootId)
                     .filter(entity -> entity.getType().equals(EntityType.EMPTY))
-                    .findFirst().orElse(null);
+                    .min(distanceToComparator(grid.midPoint())).orElse(null);
             if(targetEntity == null) {
-                return new WaitCommand();
+                return null;
             }
-            debug("Target entity for FillRandomSpace goal: " + targetEntity);
             Entity closestOwnedEntity = targetEntity.neighborsStream().filter(Entity::mine).findFirst().orElseThrow(IllegalStateException::new);
-            return new GrowCommand(closestOwnedEntity, targetEntity, EntityType.BASIC, null);
+            EntityType buildType = getBuildableType();
+            if(buildType == null) {
+                debug(this + " Can't afford any proteins");
+                return null;
+            }
+            return new GrowCommand(closestOwnedEntity, targetEntity, buildType, buildType.equals(EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
         }
 
         public String toString() {
@@ -456,27 +499,35 @@ class Player {
         debug("Commands needed: " + commandsNeeded);
         List<Command> commands = new ArrayList<>();
         for(int i = 0; i < commandsNeeded; i++) {
-            Command command;
-            if(i < goals.size()) {
-                List<Goal> organismGoals = goals.get(i);
-                while(!organismGoals.isEmpty() && organismGoals.get(0).isComplete()) {
-                    debug("Removing goal " + organismGoals.get(0).toString());
-                    organismGoals.remove(0);
-                }
-                if(organismGoals.isEmpty()) {
-                    debug("No goal, waiting");
-                    command = new WaitCommand();
+            Entity currentRoot = myRoots.get(i);
+            Command command = null;
+            for(Behavior behavior : behaviors) {
+                command = behavior.getCommand(currentRoot.getRootId());
+                if(command != null) {
+                    debug("Current behavior: " + behavior);
+                    break;
                 } else {
-                    Goal currentGoal = organismGoals.get(0);
-                    debug("Current goal: " + currentGoal);
-                    command = currentGoal.nextCommand();
+                    debug("Behavior return no command - " + behavior);
                 }
-                spendProtein(command.getBuildType());
-                command.updateState();
-                commands.add(command);
             }
+            if(command == null) {
+                command = new WaitCommand();
+                debug("Falling back to default " + command);
+            }
+            debug("Executing command " + command);
+            spendProtein(command.getBuildType());
+            command.updateState();
+            commands.add(command);
         }
         return commands;
+    }
+
+    private EntityType getBuildableType() {
+        // The entities we can build in order of priority. If we are out of As, we can't build a BASIC, so need to fall back to other types.
+        Stream<EntityType> ENTITY_BUILD_TYPES = Stream.of(EntityType.BASIC, EntityType.SPORER, EntityType.TENTACLE, EntityType.HARVESTER);
+        return ENTITY_BUILD_TYPES.filter(Player.this::canBuild)
+                .findFirst()
+                .orElse(null);
     }
 
     private boolean canBuild(EntityType type) {
@@ -487,6 +538,16 @@ class Player {
             case SPORER -> myB > 0 && myD > 0;
             case ROOT -> myA > 0 && myB > 0 && myC > 0 && myD > 0;
             default -> throw new IllegalArgumentException("Can't build type " + type);
+        };
+    }
+
+    private int getProteinCount(EntityType type) {
+        return switch(type) {
+            case A -> myA;
+            case B -> myB;
+            case C -> myC;
+            case D -> myD;
+            default -> throw new IllegalArgumentException();
         };
     }
 
@@ -534,51 +595,12 @@ class Player {
         }
     }
 
-    private Supplier<Entity> closestToEntitySupplier(Entity entity, Predicate<Entity> predicate) {
-        return () -> grid.getAllEntities().stream().filter(predicate).findFirst().orElse(null);
-    }
-
-    private List<Goal> boss2Goals() {
-        Entity closestA = grid.closestToRoot(entity -> entity.getType().equals(EntityType.A));
-        Supplier<Entity> closestToLocation = () -> grid.getAllEntities().stream().filter(entity -> entity.mine())
-                .min((o1, o2) -> o2.getX() - o1.getX() + o2.getY() - o1.getY())
-                .orElse(null);
-        Entity closestNeighborToA = closestA.neighborsStream().min(distanceToComparator(myRoot)).orElse(null);
+    private List<Behavior> bronzeLeague() {
         return Arrays.asList(
-                new BuildOn(closestToLocation, closestNeighborToA, EntityType.HARVESTER, closestNeighborToA.directionTo(closestA)),
-                new FillRandomSpace()
-        );
-    }
-
-    private List<Goal> boss3Goals() {
-        Entity targetStartEntity = grid.entityAt(8, 2);
-        Supplier<Entity> myClosestEntitySupplier = closestToEntitySupplier(targetStartEntity, entity -> entity.mine());
-        return Arrays.asList(
-                new BuildOn(myClosestEntitySupplier, targetStartEntity, EntityType.TENTACLE, Direction.E),
-                new FillRandomSpace()
-        );
-    }
-
-    private List<List<Goal>> boss4Goals() {
-        Entity closestA = grid.closestToRoot(entity -> entity.getType().equals(EntityType.A));
-        int buildX = closestA.getY() == myRoot.getY() ? 2 : 1;
-        return Arrays.asList(
-                Arrays.asList(
-                        new BuildOn(() -> myRoot, grid.entityAt(buildX, closestA.getY()), EntityType.SPORER, Direction.E),
-                        new BuildWithSpore(grid.entityAt(closestA.getX() - 2, closestA.getY()), EntityType.ROOT),
-                        new BuildOn(() -> grid.entityAt(closestA.getX() - 2, closestA.getY()), grid.entityAt(closestA.getX() - 1, closestA.getY()), EntityType.HARVESTER, Direction.E),
-                        new FillRandomSpace()
-                )
-        );
-    }
-
-    private List<List<Goal>> bronzeLeague() {
-        Entity closestA = grid.closestToRoot(entity -> entity.getType().equals(EntityType.A));
-        int buildX = closestA.getY() == myRoot.getY() ? 2 : 1;
-        return Arrays.asList(
-                Arrays.asList(
-                        new FillRandomSpace()
-                )
+                new CreateSporerBehavior(),
+                new ConsumeProteinBehavior(),
+                new BuildHarvesterBehavior(),
+                new FillRandomSpaceBehavior()
         );
     }
 
@@ -599,7 +621,6 @@ class Player {
         int height = in.nextInt(); // rows in the game grid
 
         grid = new Grid(width, height);
-        goals = new ArrayList<>();
 
         // game loop
         while (true) {
@@ -646,7 +667,7 @@ class Player {
 
             if(turn == 1) {
                 calculateDistances();
-                goals.addAll(bronzeLeague().stream().map(ArrayList::new).toList());
+                behaviors.addAll(bronzeLeague());
             }
 
             for (int i = 0; i < requiredActionsCount; i++) {
