@@ -107,6 +107,7 @@ class Player {
     private class Pathing {
 
         private Map<Entity, Map<Entity, PathInfo>> paths = new HashMap<>();
+        private Map<Entity, List<PathInfo>> sortedPaths = new HashMap<>();
 
         public Integer distance(Entity from, Entity to) {
             return Optional.ofNullable(pathInfo(from, to))
@@ -125,12 +126,32 @@ class Player {
                     .map(map -> map.get(from)).orElse(null);
         }
 
+        public List<Entity> entitiesWithinDistance(Entity from, int searchDistance) {
+            myAssert(searchDistance > 0, "Search distance must be greater than 0");
+            List<PathInfo> pathInfoList = sortedPaths.get(from);
+            if(pathInfoList == null) {
+                return Collections.emptyList();
+            }
+            PathInfo searchValue = new PathInfo(null, null, searchDistance, null);
+            int index = Collections.binarySearch(pathInfoList, searchValue, Comparator.comparingInt(PathInfo::distance));
+            if(index >= 0) {
+                // Binary search will give an arbitrary value with this distance, need to find the last one
+                while(index < pathInfoList.size() - 1 && pathInfoList.get(index + 1).distance() == searchDistance) {
+                    index++;
+                }
+            }
+            // If we didn't find the number, it must be greater than everything that is within distance, return all reachable entities
+            List<PathInfo> pathInfos = index < 0 ? pathInfoList : pathInfoList.subList(0, index + 1);
+            return pathInfos.stream().map(PathInfo::from).toList();
+        }
+
         public void generatePaths() {
             for(Entity entity : grid.getEntitySet()) {
                 if(entity.getType().equals(EntityType.WALL)) {
                     continue;
                 }
                 paths.put(entity, new HashMap<>());
+                sortedPaths.put(entity, new ArrayList<>());
                 generatePaths(entity);
             }
         }
@@ -138,14 +159,13 @@ class Player {
         private void generatePaths(Entity entity) {
             Map<Entity, PathInfo> pathsForEntity = paths.get(entity);
             pathsForEntity.clear();
-            pathsForEntity.put(entity, new PathInfo(0, Collections.emptyList()));
+            pathsForEntity.put(entity, new PathInfo(entity, entity, 0, Collections.emptyList()));
             int distance = 1;
             Queue<Entity> queue = new LinkedList<>(entity.neighbors());
             while(!queue.isEmpty()) {
                 int entitiesToProcess = queue.size();
                 for(int i = 0; i < entitiesToProcess; i++) {
                     Entity from = queue.poll();
-//                    debug("Checking " + to);
                     if(pathsForEntity.get(from) != null || from.getType().equals(EntityType.WALL)) {
                         continue;
                     }
@@ -157,17 +177,23 @@ class Player {
                             }).map(from::directionTo)
                             .toList();
                     if(!directions.isEmpty()) {
-                        pathsForEntity.put(from, new PathInfo(distance, directions));
+                        pathsForEntity.put(from, new PathInfo(from, entity, distance, directions));
                         queue.addAll(from.neighbors());
                     }
                 }
                 distance++;
             }
+            // Remove the path to self with distance 0. I don't want this coming back in query results, saying there is no path to self should be fine.
+            pathsForEntity.remove(entity);
+            List<PathInfo> sortedPathList = sortedPaths.get(entity);
+            sortedPathList.clear();
+            sortedPathList.addAll(pathsForEntity.values());
+            sortedPathList.sort(Comparator.comparingInt(PathInfo::distance));
         }
 
     }
 
-    record PathInfo(int distance, List<Direction> directions) { }
+    record PathInfo(Entity from, Entity to, int distance, List<Direction> directions) { }
 
     private enum Direction {
         N, S, E, W
@@ -553,26 +579,15 @@ class Player {
         }
     }
 
-    private class FillRandomSpaceBehavior implements Player.Behavior {
+    private class ExpandToClosestProteinBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            Player.Entity targetEntity = grid.adjacentToMine(rootId)
-                    .filter(entity -> entity.getType().equals(Player.EntityType.EMPTY))
-                    .min(distanceToComparator(grid.midPoint())).orElse(null);
-            if (targetEntity == null) {
-                return null;
-            }
-            Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(Player.Entity::mine).findFirst().orElseThrow(IllegalStateException::new);
-            Player.EntityType buildType = getBuildableType();
-            if (buildType == null) {
-                debug(this + " Can't afford any proteins");
-                return null;
-            }
-            return new Player.GrowCommand(closestOwnedEntity, targetEntity, buildType, buildType.equals(Player.EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
+            // Get all proteins, exclude
+            return null;
         }
 
         public String toString() {
-            return "[Fill Random Space]";
+            return "[Expand To Closest Protein Behavior]";
         }
     }
 
@@ -779,8 +794,8 @@ class Player {
                 new CreateNewRootBehavior(),
                 new ConsumeProteinBehavior(),
                 new BuildHarvesterBehavior(),
-                new CreateSporerBehavior(),
-                new FillRandomSpaceBehavior(),
+//                new CreateSporerBehavior(),
+//                new ExpandToClosestProteinBehavior(),
         });
     }
 
@@ -856,19 +871,16 @@ class Player {
         }
     }
 
-    private void testDistance(int x1, int y1, int x2, int y2) {
-        Entity e1 = grid.entityAt(x1, y1);
-        Entity e2 = grid.entityAt(x2, y2);
-        Integer distance = pathing.distance(e1, e2);
-        List<Direction> directions = pathing.nextDirections(e1, e2);
-        debug(String.format("Distance from (%s,%s) to (%s,%s) is %s", x1, y1, x2, y2, distance));
-        debug("Direction(s) are " + directions);
-    }
-
     private void debug(String message) {
         boolean debug = true;
         if (debug) {
             System.err.println(message);
+        }
+    }
+
+    public void myAssert(boolean b, String message) {
+        if(!b) {
+            throw new RuntimeException(message);
         }
     }
 

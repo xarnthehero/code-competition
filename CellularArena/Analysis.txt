@@ -44,9 +44,9 @@ Harvesting
 	If we are out of A or B but can build a harvester, prioritize harvesting an A/B if possible instead of eating it
 	Multiple harvesters can be put down on the same turn for the same protein
 Pathfinding
-	Map from every point to every other point - distance and best direction?
+[Done]	Map from every point to every other point - distance and best direction?
 	Need to reprocess portions when new walls are placed
-Reconsiliation
+Reconciliation
 	List of outgoing and incoming organisms?
 		This way I can readjust the map based on new walls, analyze what the enemy built last turn
 Space Denial - late game this is what I'll need for closed maps
