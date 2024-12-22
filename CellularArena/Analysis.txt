@@ -1,0 +1,121 @@
+Cellular Organism
+
+Behaviors per organism:
+
+Sporer
+	Create new root
+		If organism has a sporer, see if it makes sense to create a new root
+		For each sporer, look at possible root locations
+			Prioritize high protein proximity and away from my other organisms
+	Create a new sporer
+		Direction hints
+			Point toward the center of the map
+			Point away from my other organisms
+
+Create harvestor
+	If multiple, prioritize protein with lowest harvester count
+Get at least 1 C and D
+
+
+
+Need to track:
+	harvester count on each protein type
+	heatmap of areas to go to - number of proteins within 3 spaces that I haven't harvested
+
+
+
+
+
+--Rank 112 analysis and improvement ideas--
+Movement
+	Random placement should now look at how can we move towards the next protein
+	Need to know when to bust through a protein to open up a big area
+	With a group of proteins that I can only harvest 1 of, analyze best one to harvest
+Sporer placement is terrible
+	Prioritize early in the game
+	Check that we can afford a new root - 4+ of each resource?
+	Consult heat map
+		Can we optimize this to prevent rechecking?
+Attacking
+	When enemy has tentacle with empty space between, they will likely place another tentacle down - see if I can kill that one preemptively
+	If we are 2 spaces away from an enemy, we can look at putting down a tentacle
+Harvesting
+	We place harvesters on existing harvesting proteins
+	If we are out of A or B but can build a harvester, prioritize harvesting an A/B if possible instead of eating it
+	Multiple harvesters can be put down on the same turn for the same protein
+Pathfinding
+	Map from every point to every other point - distance and best direction?
+	Need to reprocess portions when new walls are placed
+Reconsiliation
+	List of outgoing and incoming organisms?
+		This way I can readjust the map based on new walls, analyze what the enemy built last turn
+Space Denial - late game this is what I'll need for closed maps
+	Maybe worth focusing on, if I get this right it will result in a win every time
+	Analyze if there is 1 space to control to cut off most of the map, plan centers around getting that space
+Tracking
+	Harvesters harvesting protein
+
+
+
+
+
+Pathfinding Algorithm
+	Shortest path from every tile to every other tile - distance, next direction to go
+	Need to update when new walls are created
+	Calculate at the beginning of the game
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

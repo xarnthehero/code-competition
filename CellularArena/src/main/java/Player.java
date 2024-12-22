@@ -9,11 +9,11 @@ import java.util.stream.Stream;
 class Player {
 
     private Grid grid;
-    private HashMap<Integer, Entity> entitiesById = new HashMap<>();
-    private HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
-    private Entity myRoot;
-    private List<Entity> myRoots = new ArrayList<>();
-    private Entity enemyRoot;
+    private Pathing pathing;
+    private final HashMap<Integer, Entity> entitiesById = new HashMap<>();
+    private final HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
+    private final HashMap<Integer, TurnValue> rootAttractivenessMap = new HashMap<>();
+    private final List<Entity> myRoots = new ArrayList<>();
     private int myA;
     private int myB;
     private int myC;
@@ -22,19 +22,8 @@ class Player {
     private int enemyB;
     private int enemyC;
     private int enemyD;
-    private HashMap<Entity, Integer> distanceToMyRoot;
     private int turn = 0;
     private final List<Behavior> behaviors = new ArrayList<>();
-
-    private Random random = new Random();
-
-    public HashMap<Integer, List<Entity>> getRootIdToDescendents() {
-        return rootIdToDescendents;
-    }
-
-    public void setRootIdToDescendents(HashMap<Integer, List<Entity>> rootIdToDescendents) {
-        this.rootIdToDescendents = rootIdToDescendents;
-    }
 
     private class Grid {
         private final List<List<Entity>> entities;
@@ -68,6 +57,7 @@ class Player {
                 }
             }
             entitySet = entities.stream().flatMap(Collection::stream).collect(Collectors.toSet());
+            entitySet.forEach(entity -> entity.initNeighbors());
         }
 
         public Set<Entity> getEntitySet() {
@@ -113,6 +103,71 @@ class Player {
             return possibleSpawn;
         }
     }
+
+    private class Pathing {
+
+        private Map<Entity, Map<Entity, PathInfo>> paths = new HashMap<>();
+
+        public Integer distance(Entity from, Entity to) {
+            return Optional.ofNullable(pathInfo(from, to))
+                    .map(PathInfo::distance)
+                    .orElse(null);
+        }
+
+        public List<Direction> nextDirections(Entity from, Entity to) {
+            return Optional.ofNullable(pathInfo(from, to))
+                    .map(PathInfo::directions)
+                    .orElse(Collections.emptyList());
+        }
+
+        public PathInfo pathInfo(Entity from, Entity to) {
+            return Optional.ofNullable(paths.get(to))
+                    .map(map -> map.get(from)).orElse(null);
+        }
+
+        public void generatePaths() {
+            for(Entity entity : grid.getEntitySet()) {
+                if(entity.getType().equals(EntityType.WALL)) {
+                    continue;
+                }
+                paths.put(entity, new HashMap<>());
+                generatePaths(entity);
+            }
+        }
+
+        private void generatePaths(Entity entity) {
+            Map<Entity, PathInfo> pathsForEntity = paths.get(entity);
+            pathsForEntity.clear();
+            pathsForEntity.put(entity, new PathInfo(0, Collections.emptyList()));
+            int distance = 1;
+            Queue<Entity> queue = new LinkedList<>(entity.neighbors());
+            while(!queue.isEmpty()) {
+                int entitiesToProcess = queue.size();
+                for(int i = 0; i < entitiesToProcess; i++) {
+                    Entity from = queue.poll();
+//                    debug("Checking " + to);
+                    if(pathsForEntity.get(from) != null || from.getType().equals(EntityType.WALL)) {
+                        continue;
+                    }
+                    final int currentDistance = distance;
+                    List<Direction> directions = from.neighbors().stream()
+                            .filter(neighbor -> {
+                                PathInfo neighborPathInfo = pathsForEntity.get(neighbor);
+                                return neighborPathInfo != null && neighborPathInfo.distance() == currentDistance - 1;
+                            }).map(from::directionTo)
+                            .toList();
+                    if(!directions.isEmpty()) {
+                        pathsForEntity.put(from, new PathInfo(distance, directions));
+                        queue.addAll(from.neighbors());
+                    }
+                }
+                distance++;
+            }
+        }
+
+    }
+
+    record PathInfo(int distance, List<Direction> directions) { }
 
     private enum Direction {
         N, S, E, W
@@ -164,6 +219,7 @@ class Player {
         private Entity up, down, left, right;
         private EntityType type;
         private final List<Entity> children;
+        private List<Entity> neighbors;
         private int owner;           // 1 for me, 2 for enemy, 0 for no one
         private Direction direction;
 
@@ -220,16 +276,8 @@ class Player {
             return x;
         }
 
-        public void setX(int x) {
-            this.x = x;
-        }
-
         public int getY() {
             return y;
-        }
-
-        public void setY(int y) {
-            this.y = y;
         }
 
         public Entity getUp() {
@@ -288,12 +336,16 @@ class Player {
             return -1 == owner;
         }
 
+        public void initNeighbors() {
+            neighbors = Stream.of(up, down, left, right).filter(Objects::nonNull).toList();
+        }
+
         public List<Entity> neighbors() {
-            return neighborsStream().collect(Collectors.toList());
+            return neighbors;
         }
 
         public Stream<Entity> neighborsStream() {
-            return Stream.of(up, down, left, right).filter(Objects::nonNull);
+            return neighbors.stream();
         }
 
         public Entity myNeighbor() {
@@ -620,8 +672,9 @@ class Player {
                 .orElse(null);
     }
 
-    private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) {
-    }
+    private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) { }
+
+    private record TurnValue(int round, double value) { }
 
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
         List<Entity> buildableTiles = grid.adjacentToMine(rootId)
@@ -679,29 +732,45 @@ class Player {
                 .orElse(null);
     }
 
-    private Comparator<Entity> distanceToComparator(Entity entity) {
-        return Comparator.comparing(entity1 -> Math.abs(entity.getX() - entity1.getX()) + Math.abs(entity.getY() - entity1.getY()));
-    }
+    /**
+     * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
+     */
+    private double calculateRootAttractiveness(Entity entity) {
+        double ZERO_FROM_PROTEIN = .5;
+        double ONE_FROM_PROTEIN = .25;
+        double TWO_FROM_PROTEIN = 1;
+        double THREE_FROM_PROTEIN = .5;
+        double FRIENDLY_WITHIN_THREE = -2;
 
-    private void calculateDistances() {
-        distanceToMyRoot = new HashMap<>();
-        distanceToMyRoot.put(myRoot, 0);
-        Queue<Entity> entityQueue = new LinkedList<>(myRoot.neighbors());
-        int distance = 1;
-        while (!entityQueue.isEmpty()) {
-            int size = entityQueue.size();
-            for (int i = 0; i < size; i++) {
-                Entity entity = entityQueue.poll();
-                if (entity == null) {
-                    continue;
-                }
-                if (!distanceToMyRoot.containsKey(entity) && !EntityType.WALL.equals(entity.getType())) {
-                    distanceToMyRoot.put(entity, distance);
-                    entityQueue.addAll(entity.neighbors());
-                }
+        double attractiveness = 0;
+        Set<Entity> seenEntities = new HashSet<>();
+        Queue<Entity> queue = new LinkedList<>();
+        queue.offer(entity);
+        int distance = 0;
+        while(distance <= 3) {
+            Entity currentEntity = queue.poll();
+            if(!seenEntities.add(currentEntity)) {
+                continue;
             }
+            if(currentEntity.getType().isProtein()) {
+                attractiveness += switch(distance) {
+                    case 0 -> ZERO_FROM_PROTEIN;
+                    case 1 -> ONE_FROM_PROTEIN;
+                    case 2 -> TWO_FROM_PROTEIN;
+                    case 3 -> THREE_FROM_PROTEIN;
+                    default -> 0;
+                };
+            } else if(currentEntity.mine()) {
+                attractiveness += FRIENDLY_WITHIN_THREE;
+            }
+            queue.addAll(currentEntity.neighbors());
             distance++;
         }
+        return attractiveness;
+    }
+
+    private Comparator<Entity> distanceToComparator(Entity entity) {
+        return Comparator.comparing(entity1 -> Math.abs(entity.getX() - entity1.getX()) + Math.abs(entity.getY() - entity1.getY()));
     }
 
     private List<Behavior> bronzeLeague() {
@@ -729,6 +798,7 @@ class Player {
         int height = in.nextInt(); // rows in the game grid
 
         grid = new Grid(width, height);
+        pathing = new Pathing();
 
         // game loop
         while (true) {
@@ -745,10 +815,7 @@ class Player {
                 entity.setOwner(in.nextInt()); // 1 if your organ, 0 if target organ, -1 if neither
                 if (entityType.equals(EntityType.ROOT)) {
                     if (entity.mine()) {
-                        myRoot = grid.entityAt(x, y);
                         myRoots.add(entity);
-                    } else {
-                        enemyRoot = grid.entityAt(x, y);
                     }
                 }
                 entity.setId(in.nextInt()); // id of this entity if it's an organ, 0 otherwise
@@ -776,14 +843,26 @@ class Player {
             myRoots.sort(Comparator.comparingInt(Entity::getId));
 
             if (turn == 1) {
-                calculateDistances();
+                pathing.generatePaths();
                 behaviors.addAll(bronzeLeague());
+                // Set initial values for how attractive it is to create a root node on each location. During a turn, if
+                // a tile comes up as the most attractive option, recalculate with the current state to see if its value has changed.
+                grid.getEntitySet().forEach(entity -> rootAttractivenessMap.put(entity.getRootId(), new TurnValue(turn, calculateRootAttractiveness(entity))));
             }
 
             getCommands(requiredActionsCount).stream()
                     .map(Command::getText)
                     .forEach(System.out::println);
         }
+    }
+
+    private void testDistance(int x1, int y1, int x2, int y2) {
+        Entity e1 = grid.entityAt(x1, y1);
+        Entity e2 = grid.entityAt(x2, y2);
+        Integer distance = pathing.distance(e1, e2);
+        List<Direction> directions = pathing.nextDirections(e1, e2);
+        debug(String.format("Distance from (%s,%s) to (%s,%s) is %s", x1, y1, x2, y2, distance));
+        debug("Direction(s) are " + directions);
     }
 
     private void debug(String message) {
