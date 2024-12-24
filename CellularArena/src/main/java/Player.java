@@ -502,22 +502,7 @@ class Player {
             if (!canBuild(EntityType.SPORER) || !shouldConsiderNewRoot()) {
                 return null;
             }
-//            empty spaces -> tuple with space to direction -> space/direction/entitiesInFront -> flatmap space/direction/entityInFront
-//                sort by attractiveness
-            double ATTRACTIVENESS_PER_DISTANCE = .5;
-            Function<Entity, Stream<AttractivenessResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new AttractivenessResult(entity, direction, null, null));
-            AttractivenessResult mostAttractive = grid.adjacentToMine(rootId)
-                    .filter(Entity::isEmpty)
-                    .flatMap(entityToDirectionTupleMapper)
-                    .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
-                    .map(result -> {
-                        double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
-                        double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
-                        return new AttractivenessResult(result.from(), result.direction(), result.to(), totalAttractiveness);
-                    })
-//                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.attractiveness(), result.from(), result.direction(), result.to())))
-                    .max(Comparator.comparingDouble(AttractivenessResult::attractiveness))
-                    .orElse(null);
+            AttractivenessResult mostAttractive = getRootExpandLocation(rootId, false);
 
             debug(String.format("%s Most attractive: %s", this, mostAttractive));
             if (mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
@@ -540,7 +525,17 @@ class Player {
         @Override
         public Player.Command getCommand(int rootId) {
             AttractivenessResult nextRoot = nextCreateRootParams.get(rootId);
-            if (nextRoot == null || !canBuild(Player.EntityType.ROOT)) {
+            if (nextRoot == null) {
+                // Didn't create a sporer last turn with the intent to create a new root this turn.
+                // See if we have an existing sporer that would make sense to create a new root.
+                if (shouldConsiderNewRoot()) {
+                    AttractivenessResult result = getRootExpandLocation(rootId, true);
+                    if (result != null && shouldExpand(result.attractiveness())) {
+                        nextRoot = result;
+                    }
+                }
+            }
+            if (nextRoot == null) {
                 return null;
             }
             if (!nextRoot.to().isBuildable()) {
@@ -599,7 +594,7 @@ class Player {
             // Prioritize not building on something we are harvesting, then what is low on protein count.
             Comparator<BuildEntityTuple> notHarvestingComparator = Comparator.comparingInt(value -> EntityPredicates.HARVESTED_BY_ME.test(value.buildableTile()) ? 1 : 0);
             BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(
-                    notHarvestingComparator.thenComparingInt(value -> getProteinCount(value.target().getType()))
+                    notHarvestingComparator.thenComparingLong(value -> Optional.ofNullable(myHarvesterCountMap.get(value.target().getType())).orElse(0L))
             ).get();
             return new GrowCommand(harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()));
         }
@@ -811,6 +806,40 @@ class Player {
     }
 
     /**
+     * @param rootId           The rootId for the entity
+     * @param useExistingSpore True if we want to try spawning a root from an existing spore, false if are looking
+     *                         to create a spore, then spawn a root next turn.
+     * @return The result of all possibilities for new ROOT expansion
+     */
+    private AttractivenessResult getRootExpandLocation(int rootId, boolean useExistingSpore) {
+        double ATTRACTIVENESS_PER_DISTANCE = .5;
+        Function<Entity, Stream<AttractivenessResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new AttractivenessResult(entity, direction, null, null));
+
+        // Stream with the place we want to place a spore and its direction
+        Stream<AttractivenessResult> sporeDirectionStream;
+        if (useExistingSpore) {
+            sporeDirectionStream = grid.myEntitiesStream()
+                    .filter(entity -> entity.getType().equals(EntityType.SPORER))
+                    .map(entity -> new AttractivenessResult(entity, entity.getDirection(), null, null));
+        } else {
+            sporeDirectionStream = grid.adjacentToMine(rootId)
+                    .filter(Entity::isEmpty)
+                    .flatMap(entityToDirectionTupleMapper);
+        }
+
+        return sporeDirectionStream
+                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
+                .map(result -> {
+                    double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
+                    double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
+                    return new AttractivenessResult(result.from(), result.direction(), result.to(), totalAttractiveness);
+                })
+//                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.attractiveness(), result.from(), result.direction(), result.to())))
+                .max(Comparator.comparingDouble(AttractivenessResult::attractiveness))
+                .orElse(null);
+    }
+
+    /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
     private double calculateRootAttractiveness(Entity source) {
@@ -827,7 +856,7 @@ class Player {
         double ONE_FROM_PROTEIN = .25;
         double TWO_FROM_PROTEIN = 1;
         double THREE_FROM_PROTEIN = .5;
-        double FRIENDLY_WITHIN_THREE = -2;
+        double FRIENDLY_WITHIN_THREE = -3;
 
         int distance = pathing.distance(source, closeByEntity);
         double attractivenessImpact = 0;
