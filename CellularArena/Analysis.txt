@@ -26,15 +26,15 @@ Need to track:
 
 
 
---Rank 112 analysis and improvement ideas--
+--12/22/24 Rank 112 analysis and improvement ideas--
 Movement
 	Random placement should now look at how can we move towards the next protein
 	Need to know when to bust through a protein to open up a big area
 	With a group of proteins that I can only harvest 1 of, analyze best one to harvest
 Sporer placement is terrible
 	Prioritize early in the game
-	Check that we can afford a new root - 4+ of each resource?
-	Consult heat map
+[Done]	Check that we can afford a new root - 4+ of each resource?
+[Done]	Consult heat map
 		Can we optimize this to prevent rechecking?
 Attacking
 	When enemy has tentacle with empty space between, they will likely place another tentacle down - see if I can kill that one preemptively

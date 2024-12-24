@@ -1,4 +1,5 @@
 import java.util.*;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -12,8 +13,9 @@ class Player {
     private Pathing pathing;
     private final HashMap<Integer, Entity> entitiesById = new HashMap<>();
     private final HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
-    private final HashMap<Integer, TurnValue> rootAttractivenessMap = new HashMap<>();
     private final List<Entity> myRoots = new ArrayList<>();
+    private final Map<Entity, Double> buildAttractiveness = new HashMap<>();
+    private final Map<Integer, AttractivenessResult> nextCreateRootParams = new HashMap<>();
     private int myA;
     private int myB;
     private int myC;
@@ -129,14 +131,14 @@ class Player {
         public List<Entity> entitiesWithinDistance(Entity from, int searchDistance) {
             myAssert(searchDistance > 0, "Search distance must be greater than 0");
             List<PathInfo> pathInfoList = sortedPaths.get(from);
-            if(pathInfoList == null) {
+            if (pathInfoList == null) {
                 return Collections.emptyList();
             }
             PathInfo searchValue = new PathInfo(null, null, searchDistance, null);
             int index = Collections.binarySearch(pathInfoList, searchValue, Comparator.comparingInt(PathInfo::distance));
-            if(index >= 0) {
+            if (index >= 0) {
                 // Binary search will give an arbitrary value with this distance, need to find the last one
-                while(index < pathInfoList.size() - 1 && pathInfoList.get(index + 1).distance() == searchDistance) {
+                while (index < pathInfoList.size() - 1 && pathInfoList.get(index + 1).distance() == searchDistance) {
                     index++;
                 }
             }
@@ -146,8 +148,8 @@ class Player {
         }
 
         public void generatePaths() {
-            for(Entity entity : grid.getEntitySet()) {
-                if(entity.getType().equals(EntityType.WALL)) {
+            for (Entity entity : grid.getEntitySet()) {
+                if (entity.getType().equals(EntityType.WALL)) {
                     continue;
                 }
                 paths.put(entity, new HashMap<>());
@@ -162,11 +164,11 @@ class Player {
             pathsForEntity.put(entity, new PathInfo(entity, entity, 0, Collections.emptyList()));
             int distance = 1;
             Queue<Entity> queue = new LinkedList<>(entity.neighbors());
-            while(!queue.isEmpty()) {
+            while (!queue.isEmpty()) {
                 int entitiesToProcess = queue.size();
-                for(int i = 0; i < entitiesToProcess; i++) {
+                for (int i = 0; i < entitiesToProcess; i++) {
                     Entity from = queue.poll();
-                    if(pathsForEntity.get(from) != null || from.getType().equals(EntityType.WALL)) {
+                    if (pathsForEntity.get(from) != null || from.getType().equals(EntityType.WALL)) {
                         continue;
                     }
                     final int currentDistance = distance;
@@ -176,7 +178,7 @@ class Player {
                                 return neighborPathInfo != null && neighborPathInfo.distance() == currentDistance - 1;
                             }).map(from::directionTo)
                             .toList();
-                    if(!directions.isEmpty()) {
+                    if (!directions.isEmpty()) {
                         pathsForEntity.put(from, new PathInfo(from, entity, distance, directions));
                         queue.addAll(from.neighbors());
                     }
@@ -193,7 +195,8 @@ class Player {
 
     }
 
-    record PathInfo(Entity from, Entity to, int distance, List<Direction> directions) { }
+    record PathInfo(Entity from, Entity to, int distance, List<Direction> directions) {
+    }
 
     private enum Direction {
         N, S, E, W
@@ -392,20 +395,28 @@ class Player {
         }
 
         public Entity entityInFront() {
-            if(direction == null) {
+            if (direction == null) {
                 return null;
             }
             return entityInDirection(direction);
         }
 
         public Stream<Entity> entitiesInFront() {
+            return entitiesInFront(direction);
+        }
+
+        public Stream<Entity> entitiesInFront(Direction givenDirection) {
             List<Entity> entities = new ArrayList<>();
-            Entity currentEntity = this.entityInDirection(direction);
+            Entity currentEntity = this.entityInDirection(givenDirection);
             while (currentEntity != null && EntityPredicates.SHOOT_ROOT_OVER.test(currentEntity)) {
                 entities.add(currentEntity);
-                currentEntity = currentEntity.entityInDirection(direction);
+                currentEntity = currentEntity.entityInDirection(givenDirection);
             }
             return entities.stream();
+        }
+
+        public boolean isInLineWith(Entity other) {
+            return x == other.getX() ^ y == other.getY();
         }
 
         public boolean isEmpty() {
@@ -459,36 +470,41 @@ class Player {
         }
     }
 
+
     /**
      * When an organism doesn't have a sporer, create a new one so we can branch out.
      */
     private class CreateSporerBehavior implements Behavior {
         @Override
         public Command getCommand(int rootId) {
-            if (
-                    canBuild(EntityType.SPORER) &&
-                            grid.myEntitiesStream().noneMatch(entity -> entity.getRootId() == rootId && entity.getType().equals(EntityType.SPORER))
-            ) {
-                // No sporer for this root id, build 1
-                Entity potentialSporer = grid.adjacentToMine(rootId)
-                        .filter(Entity::isEmpty)
-                        .min(distanceToComparator(grid.midPoint()))
-                        .orElse(null);
-                if (potentialSporer != null) {
-                    Entity myEntity = potentialSporer.myNeighbor(entity -> entity.getRootId() == rootId);
-                    Entity furthestNewRoot = grid.rootSpawnLocations(potentialSporer)
-                            .stream()
-                            .max(distanceToComparator(potentialSporer))
-                            .orElse(null);
-                    if (furthestNewRoot != null) {
-                        Direction direction = potentialSporer.directionTo(furthestNewRoot);
-                        return new GrowCommand(myEntity, potentialSporer, EntityType.SPORER, direction);
-                    } else {
-                        debug(this + " No potential roots to spawn after putting down sporer");
-                    }
-                } else {
-                    debug(this + " No tile to spawn sporer");
-                }
+            if (!canBuild(EntityType.SPORER) || !shouldConsiderNewRoot()) {
+                return null;
+            }
+//            empty spaces -> tuple with space to direction -> space/direction/entitiesInFront -> flatmap space/direction/entityInFront
+//                sort by attractiveness
+            double ATTRACTIVENESS_PER_DISTANCE = .5;
+            Function<Entity, Stream<AttractivenessResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new AttractivenessResult(entity, direction, null, null));
+            AttractivenessResult mostAttractive = grid.adjacentToMine(rootId)
+                    .filter(Entity::isEmpty)
+                    .flatMap(entityToDirectionTupleMapper)
+                    .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
+                    .map(result -> {
+                        double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
+                        double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
+                        return new AttractivenessResult(result.from(), result.direction(), result.to(), totalAttractiveness);
+                    })
+//                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.attractiveness(), result.from(), result.direction(), result.to())))
+                    .max(Comparator.comparingDouble(AttractivenessResult::attractiveness))
+                    .orElse(null);
+
+            debug(String.format("%s Most attractive: %s", this, mostAttractive));
+            if(mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
+                // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
+                nextCreateRootParams.put(rootId, mostAttractive);
+                Entity buildFrom = mostAttractive.from().myNeighbor();
+                Entity buildTo = mostAttractive.from();
+                Direction direction = mostAttractive.from().directionTo(mostAttractive.to());
+                return new GrowCommand(buildFrom, buildTo, EntityType.SPORER, direction);
             }
             return null;
         }
@@ -501,23 +517,15 @@ class Player {
     private class CreateNewRootBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            if (!canBuild(Player.EntityType.ROOT)) {
+            AttractivenessResult nextRoot = nextCreateRootParams.get(rootId);
+            if (nextRoot == null || !canBuild(Player.EntityType.ROOT)) {
                 return null;
             }
-            Player.Entity sporer = grid.myEntitiesStream()
-                    .filter(entity -> entity.getType().equals(Player.EntityType.SPORER))
-                    .filter(entity -> entity.getRootId() == rootId)
-                    .findFirst()
-                    .orElse(null);
-            if (sporer == null) {
-                // There is no sporer OR we have already made new root in that direction
+            if(!nextRoot.to().isBuildable()) {
+                debug(String.format("%s Wanted to build new ROOT but %s was built on last turn", this, nextRoot.to()));
                 return null;
             }
-            Player.Entity newRootLocation = findBestNewRootLocation(sporer);
-            if (newRootLocation == null) {
-                return null;
-            }
-            return new Player.SporeCommand(sporer, newRootLocation);
+            return new Player.SporeCommand(nextRoot.from(), nextRoot.to());
         }
 
         public String toString() {
@@ -578,6 +586,30 @@ class Player {
             return "[Build Harvester Behavior]";
         }
     }
+
+    private class FillRandomSpaceBehavior implements Player.Behavior {
+        @Override
+        public Player.Command getCommand(int rootId) {
+            Player.Entity targetEntity = grid.adjacentToMine(rootId)
+                    .filter(entity -> entity.getType().equals(Player.EntityType.EMPTY))
+                    .min(distanceToComparator(grid.midPoint())).orElse(null);
+            if (targetEntity == null) {
+                return null;
+            }
+            Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(Player.Entity::mine).findFirst().orElseThrow(IllegalStateException::new);
+            Player.EntityType buildType = getBuildableType();
+            if (buildType == null) {
+                debug(this + " Can't afford any proteins");
+                return null;
+            }
+            return new Player.GrowCommand(closestOwnedEntity, targetEntity, buildType, buildType.equals(Player.EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
+        }
+
+        public String toString() {
+            return "[Fill Random Space]";
+        }
+    }
+
 
     private class ExpandToClosestProteinBehavior implements Player.Behavior {
         @Override
@@ -657,7 +689,8 @@ class Player {
     private List<Command> getCommands(int commandsNeeded) {
         debug("Commands needed: " + commandsNeeded);
         List<Command> commands = new ArrayList<>();
-        for (int i = 0; i < commandsNeeded; i++) {
+        // Iterate my roots in reverse order so ostensibly further forward organisms act first
+        for (int i = commandsNeeded - 1; i >= 0; i--) {
             Entity currentRoot = myRoots.get(i);
             Command command = null;
             for (Behavior behavior : behaviors) {
@@ -687,9 +720,17 @@ class Player {
                 .orElse(null);
     }
 
-    private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) { }
+    private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) {
+    }
 
-    private record TurnValue(int round, double value) { }
+    private record AttractivenessResult(Entity from, Direction direction, Entity to, Double attractiveness) {
+    }
+
+    public record Tuple2<A, B>(A a, B b) {
+    }
+
+    public record Tuple3<A, B, C>(A a, B b, C c) {
+    }
 
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
         List<Entity> buildableTiles = grid.adjacentToMine(rootId)
@@ -750,38 +791,45 @@ class Player {
     /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
-    private double calculateRootAttractiveness(Entity entity) {
+    private double calculateRootAttractiveness(Entity source) {
+        Double result = buildAttractiveness.get(source);
+        return Optional.ofNullable(result).orElseGet(() ->
+                pathing.entitiesWithinDistance(source, 3)
+                .stream()
+                .reduce(0.0, (attractivenessSum, closeByEntity) -> attractivenessImpact(source, closeByEntity) + attractivenessSum, Double::sum)
+        );
+    }
+
+    private double attractivenessImpact(Entity source, Entity closeByEntity) {
         double ZERO_FROM_PROTEIN = .5;
         double ONE_FROM_PROTEIN = .25;
         double TWO_FROM_PROTEIN = 1;
         double THREE_FROM_PROTEIN = .5;
         double FRIENDLY_WITHIN_THREE = -2;
 
-        double attractiveness = 0;
-        Set<Entity> seenEntities = new HashSet<>();
-        Queue<Entity> queue = new LinkedList<>();
-        queue.offer(entity);
-        int distance = 0;
-        while(distance <= 3) {
-            Entity currentEntity = queue.poll();
-            if(!seenEntities.add(currentEntity)) {
-                continue;
-            }
-            if(currentEntity.getType().isProtein()) {
-                attractiveness += switch(distance) {
-                    case 0 -> ZERO_FROM_PROTEIN;
-                    case 1 -> ONE_FROM_PROTEIN;
-                    case 2 -> TWO_FROM_PROTEIN;
-                    case 3 -> THREE_FROM_PROTEIN;
-                    default -> 0;
-                };
-            } else if(currentEntity.mine()) {
-                attractiveness += FRIENDLY_WITHIN_THREE;
-            }
-            queue.addAll(currentEntity.neighbors());
-            distance++;
+        int distance = pathing.distance(source, closeByEntity);
+        double attractivenessImpact = 0;
+        if (closeByEntity.getType().isProtein()) {
+            attractivenessImpact += switch (distance) {
+                case 0 -> ZERO_FROM_PROTEIN;
+                case 1 -> ONE_FROM_PROTEIN;
+                case 2 -> TWO_FROM_PROTEIN;
+                case 3 -> THREE_FROM_PROTEIN;
+                default -> 0;
+            };
+        } else if (closeByEntity.mine()) {
+            attractivenessImpact += FRIENDLY_WITHIN_THREE;
         }
-        return attractiveness;
+        return attractivenessImpact;
+    }
+
+    private boolean shouldConsiderNewRoot() {
+        int MIN_EXPAND_PROTEIN = 3;
+        return Stream.of(myA, myB, myC, myD).allMatch(integer -> integer >= MIN_EXPAND_PROTEIN);
+    }
+
+    private boolean shouldExpand(double attractiveness) {
+        return attractiveness >= 4;
     }
 
     private Comparator<Entity> distanceToComparator(Entity entity) {
@@ -792,10 +840,11 @@ class Player {
         return Arrays.asList(new Behavior[]{
                 new AttackBehavior(),
                 new CreateNewRootBehavior(),
+                new CreateSporerBehavior(),
                 new ConsumeProteinBehavior(),
                 new BuildHarvesterBehavior(),
-//                new CreateSporerBehavior(),
-//                new ExpandToClosestProteinBehavior(),
+                new FillRandomSpaceBehavior(),
+                new ExpandToClosestProteinBehavior(),
         });
     }
 
@@ -805,6 +854,7 @@ class Player {
         entitiesById.clear();
         rootIdToDescendents.clear();
         grid.getEntitySet().forEach(Entity::reset);
+        buildAttractiveness.clear();
     }
 
     private void start() {
@@ -860,9 +910,6 @@ class Player {
             if (turn == 1) {
                 pathing.generatePaths();
                 behaviors.addAll(bronzeLeague());
-                // Set initial values for how attractive it is to create a root node on each location. During a turn, if
-                // a tile comes up as the most attractive option, recalculate with the current state to see if its value has changed.
-                grid.getEntitySet().forEach(entity -> rootAttractivenessMap.put(entity.getRootId(), new TurnValue(turn, calculateRootAttractiveness(entity))));
             }
 
             getCommands(requiredActionsCount).stream()
@@ -879,7 +926,7 @@ class Player {
     }
 
     public void myAssert(boolean b, String message) {
-        if(!b) {
+        if (!b) {
             throw new RuntimeException(message);
         }
     }
