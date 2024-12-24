@@ -29,6 +29,7 @@ class Player {
     private int enemyD;
     private int turn = 0;
     private Integer currentRootId;
+    private static boolean showRootIdOnCommand = false;
     private final List<Behavior> behaviors = new ArrayList<>();
 
     private class Grid {
@@ -485,7 +486,7 @@ class Player {
                 return null;
             }
             BuildEntityTuple ggNoob = possibleAttacks.stream().max(Comparator.comparingInt(buildEntityTuple -> buildEntityTuple.target().descendentCount())).get();
-            return new GrowCommand(ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.target()));
+            return new GrowCommand(rootId, ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.target()));
         }
 
         public String toString() {
@@ -512,7 +513,7 @@ class Player {
                 Entity buildFrom = mostAttractive.from().myNeighbor();
                 Entity buildTo = mostAttractive.from();
                 Direction direction = mostAttractive.from().directionTo(mostAttractive.to());
-                return new GrowCommand(buildFrom, buildTo, EntityType.SPORER, direction);
+                return new GrowCommand(rootId, buildFrom, buildTo, EntityType.SPORER, direction);
             }
             return null;
         }
@@ -544,7 +545,7 @@ class Player {
                 debug(String.format("%s Wanted to build new ROOT but %s was built on last turn", this, nextRoot.to()));
                 return null;
             }
-            return new Player.SporeCommand(nextRoot.from(), nextRoot.to());
+            return new Player.SporeCommand(rootId, nextRoot.from(), nextRoot.to());
         }
 
         public String toString() {
@@ -568,9 +569,9 @@ class Player {
                     continue;
                 }
                 for (Entity protein : grid.getEntitySet().stream().filter(entity -> entity.getType().equals(proteinType)).toList()) {
-                    Entity myNeighbor = protein.myNeighbor();
+                    Entity myNeighbor = protein.myNeighbor(entity -> entity.getRootId() == rootId);
                     if (myNeighbor != null && !EntityPredicates.HARVESTED_BY_ME.test(protein)) {
-                        return new Player.GrowCommand(myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein));
+                        return new Player.GrowCommand(rootId, myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein));
                     }
                 }
             }
@@ -598,7 +599,7 @@ class Player {
             BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(
                     notHarvestingComparator.thenComparingLong(value -> Optional.ofNullable(myHarvesterCountMap.get(value.target().getType())).orElse(0L))
             ).get();
-            return new GrowCommand(harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()));
+            return new GrowCommand(rootId, harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()));
         }
 
         public String toString() {
@@ -616,13 +617,13 @@ class Player {
             if (targetEntity == null) {
                 return null;
             }
-            Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(Player.Entity::mine).findFirst().orElseThrow(IllegalStateException::new);
+            Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(entity -> entity.getRootId() == rootId).findFirst().orElseThrow(IllegalStateException::new);
             Player.EntityType buildType = getArbitraryBuildableType();
             if (buildType == null) {
                 debug(this + " Can't afford any proteins");
                 return null;
             }
-            return new Player.GrowCommand(closestOwnedEntity, targetEntity, buildType, buildType.equals(Player.EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
+            return new Player.GrowCommand(rootId, closestOwnedEntity, targetEntity, buildType, buildType.equals(Player.EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
         }
 
         public String toString() {
@@ -651,6 +652,12 @@ class Player {
             return null;
         }
 
+        default Player.Entity getBuildFrom() {
+            return null;
+        }
+
+        int rootId();
+
         // Called when the command is chosen to be executed. Can call ghostEntity() if it is creating a new entity.
         void updateState();
 
@@ -668,10 +675,10 @@ class Player {
         }
     }
 
-    private record WaitCommand() implements Player.Command {
+    private record WaitCommand(int rootId) implements Player.Command {
         @Override
         public String getText() {
-            return "WAIT";
+            return "WAIT" + (showRootIdOnCommand ? " " + rootId + " WAIT" : "");
         }
 
         @Override
@@ -679,14 +686,14 @@ class Player {
         }
     }
 
-    private record GrowCommand(Player.Entity from, Player.Entity to, Player.EntityType type,
+    private record GrowCommand(int rootId, Player.Entity from, Player.Entity to, Player.EntityType type,
                                Player.Direction direction) implements Player.Command {
         @Override
         public String getText() {
             if (direction != null) {
-                return String.format("GROW %s %s %s %s %s", from.getId(), to.getX(), to.getY(), type, direction.name());
+                return String.format("GROW %s %s %s %s %s%s", from.getId(), to.getX(), to.getY(), type, direction.name(), showRootIdOnCommand ? " " + rootId + " GROW" : "");
             }
-            return String.format("GROW %s %s %s %s", from.getId(), to.getX(), to.getY(), type);
+            return String.format("GROW %s %s %s %s%s", from.getId(), to.getX(), to.getY(), type, showRootIdOnCommand ? " " + rootId + " GROW" : "");
         }
 
         @Override
@@ -695,20 +702,30 @@ class Player {
         }
 
         @Override
+        public Entity getBuildFrom() {
+            return from;
+        }
+
+        @Override
         public void updateState() {
             ghostEntity(from, to, type, direction);
         }
     }
 
-    private record SporeCommand(Player.Entity from, Player.Entity to) implements Player.Command {
+    private record SporeCommand(int rootId, Player.Entity from, Player.Entity to) implements Player.Command {
         @Override
         public String getText() {
-            return String.format("SPORE %s %s %s", from.getId(), to.getX(), to.getY());
+            return String.format("SPORE %s %s %s%s", from.getId(), to.getX(), to.getY(), showRootIdOnCommand ? " " + rootId + " SPORE" : "");
         }
 
         @Override
         public Player.EntityType getBuildType() {
             return Player.EntityType.ROOT;
+        }
+
+        @Override
+        public Entity getBuildFrom() {
+            return from;
         }
 
         @Override
@@ -733,12 +750,16 @@ class Player {
                 }
             }
             if (command == null) {
-                command = new WaitCommand();
+                command = new WaitCommand(currentRoot.getId());
                 debug("Falling back to default " + command);
             }
             debug("Executing command " + command);
             spendProtein(command.getBuildType());
             command.updateState();
+            Entity buildFrom = command.getBuildFrom();
+            if(buildFrom != null && buildFrom.getRootId() != command.rootId()) {
+                throw new IllegalStateException(String.format("It is root %s's turn but we are producing from %s with root id %s", command.rootId(), buildFrom, buildFrom.getRootId()));
+            }
             commands.add(command);
         }
         currentRootId = null;
@@ -771,7 +792,7 @@ class Player {
         List<BuildEntityTuple> tuples = new ArrayList<>();
         for (Entity emptyTile : buildableTiles) {
             emptyTile.neighborsStream().filter(targetPredicate).forEach(target -> {
-                tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(), emptyTile, target));
+                tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(entity -> entity.getRootId() == rootId), emptyTile, target));
             });
         }
         return tuples;
@@ -838,6 +859,7 @@ class Player {
 
         return sporeDirectionStream
                 .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
+                .filter(result -> !EntityPredicates.ENEMY_ATTACKING.test(result.to()))
                 .map(result -> {
                     double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
                     double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
