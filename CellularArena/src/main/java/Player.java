@@ -611,6 +611,7 @@ class Player {
         public Player.Command getCommand(int rootId) {
             Player.Entity targetEntity = grid.adjacentToMine(rootId)
                     .filter(entity -> entity.getType().equals(Player.EntityType.EMPTY))
+                    .filter(entity -> !EntityPredicates.ENEMY_ATTACKING.test(entity))
                     .min(distanceToComparator(grid.midPoint())).orElse(null);
             if (targetEntity == null) {
                 return null;
@@ -661,6 +662,9 @@ class Player {
             to.setType(type);
             to.setOwner(Owner.ME);
             to.setDirection(direction);
+            if(EntityPredicates.ENEMY_ATTACKING.test(to)) {
+                throw new IllegalArgumentException("Trying to build where an enemy is attacking (" + to + "), fix that situation!");
+            }
         }
     }
 
