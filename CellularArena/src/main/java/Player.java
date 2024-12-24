@@ -115,6 +115,11 @@ class Player {
 
         private Map<Entity, Map<Entity, PathInfo>> paths = new HashMap<>();
         private Map<Entity, List<PathInfo>> sortedPaths = new HashMap<>();
+        private final int maxDepth;
+
+        public Pathing(int maxDepth) {
+            this.maxDepth = maxDepth;
+        }
 
         public Integer distance(Entity from, Entity to) {
             return Optional.ofNullable(pathInfo(from, to))
@@ -169,7 +174,7 @@ class Player {
             pathsForEntity.put(entity, new PathInfo(entity, entity, 0, Collections.emptyList()));
             int distance = 1;
             Queue<Entity> queue = new LinkedList<>(entity.neighbors());
-            while (!queue.isEmpty()) {
+            while (!queue.isEmpty() && distance < maxDepth) {
                 int entitiesToProcess = queue.size();
                 for (int i = 0; i < entitiesToProcess; i++) {
                     Entity from = queue.poll();
@@ -401,8 +406,8 @@ class Player {
             return neighbors.stream();
         }
 
-        public Entity myNeighbor() {
-            return myNeighbor(tile -> true);
+        public Entity myNeighbor(int rootId) {
+            return myNeighbor(tile -> rootId == tile.getRootId());
         }
 
         public Entity myNeighbor(Predicate<Entity> predicate) {
@@ -510,7 +515,7 @@ class Player {
             if (mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
                 // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
                 nextCreateRootParams.put(rootId, mostAttractive);
-                Entity buildFrom = mostAttractive.from().myNeighbor();
+                Entity buildFrom = mostAttractive.from().myNeighbor(rootId);
                 Entity buildTo = mostAttractive.from();
                 Direction direction = mostAttractive.from().directionTo(mostAttractive.to());
                 return new GrowCommand(rootId, buildFrom, buildTo, EntityType.SPORER, direction);
@@ -569,7 +574,7 @@ class Player {
                     continue;
                 }
                 for (Entity protein : grid.getEntitySet().stream().filter(entity -> entity.getType().equals(proteinType)).toList()) {
-                    Entity myNeighbor = protein.myNeighbor(entity -> entity.getRootId() == rootId);
+                    Entity myNeighbor = protein.myNeighbor(rootId);
                     if (myNeighbor != null && !EntityPredicates.HARVESTED_BY_ME.test(protein)) {
                         return new Player.GrowCommand(rootId, myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein));
                     }
@@ -684,6 +689,8 @@ class Player {
         @Override
         public void updateState() {
         }
+
+
     }
 
     private record GrowCommand(int rootId, Player.Entity from, Player.Entity to, Player.EntityType type,
@@ -792,7 +799,7 @@ class Player {
         List<BuildEntityTuple> tuples = new ArrayList<>();
         for (Entity emptyTile : buildableTiles) {
             emptyTile.neighborsStream().filter(targetPredicate).forEach(target -> {
-                tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(entity -> entity.getRootId() == rootId), emptyTile, target));
+                tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(rootId), emptyTile, target));
             });
         }
         return tuples;
@@ -985,7 +992,7 @@ class Player {
         int height = in.nextInt(); // rows in the game grid
 
         grid = new Grid(width, height);
-        pathing = new Pathing();
+        pathing = new Pathing(20);
 
         // game loop
         while (true) {
