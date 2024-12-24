@@ -28,6 +28,7 @@ class Player {
     private int enemyC;
     private int enemyD;
     private int turn = 0;
+    private Integer currentRootId;
     private final List<Behavior> behaviors = new ArrayList<>();
 
     private class Grid {
@@ -504,7 +505,7 @@ class Player {
             }
             AttractivenessResult mostAttractive = getRootExpandLocation(rootId, false);
 
-            debug(String.format("%s Most attractive: %s", this, mostAttractive));
+//            debug(String.format("%s Most attractive: %s", this, mostAttractive));
             if (mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
                 // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
                 nextCreateRootParams.put(rootId, mostAttractive);
@@ -524,12 +525,13 @@ class Player {
     private class CreateNewRootBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            AttractivenessResult nextRoot = nextCreateRootParams.get(rootId);
+            AttractivenessResult nextRoot = nextCreateRootParams.remove(rootId);
             if (nextRoot == null) {
                 // Didn't create a sporer last turn with the intent to create a new root this turn.
                 // See if we have an existing sporer that would make sense to create a new root.
                 if (shouldConsiderNewRoot()) {
                     AttractivenessResult result = getRootExpandLocation(rootId, true);
+                    debug("Attractiveness result for root id " + rootId + ": " + result);
                     if (result != null && shouldExpand(result.attractiveness())) {
                         nextRoot = result;
                     }
@@ -717,6 +719,7 @@ class Player {
         // Iterate my roots in reverse order so ostensibly further forward organisms act first
         for (int i = commandsNeeded - 1; i >= 0; i--) {
             Entity currentRoot = myRoots.get(i);
+            currentRootId = currentRoot.getId();
             Command command = null;
             for (Behavior behavior : behaviors) {
                 command = behavior.getCommand(currentRoot.getRootId());
@@ -734,6 +737,7 @@ class Player {
             command.updateState();
             commands.add(command);
         }
+        currentRootId = null;
         return commands;
     }
 
@@ -819,6 +823,7 @@ class Player {
         Stream<AttractivenessResult> sporeDirectionStream;
         if (useExistingSpore) {
             sporeDirectionStream = grid.myEntitiesStream()
+                    .filter(entity -> entity.getRootId() == rootId)
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
                     .map(entity -> new AttractivenessResult(entity, entity.getDirection(), null, null));
         } else {
@@ -1016,6 +1021,9 @@ class Player {
     private void debug(String message) {
         boolean debug = true;
         if (debug) {
+            if(currentRootId != null) {
+                message = "[" + currentRootId + "] " + message;
+            }
             System.err.println(message);
         }
     }
