@@ -17,6 +17,8 @@ class Player {
     private final Map<Entity, Double> buildAttractiveness = new HashMap<>();
     private final Map<Integer, AttractivenessResult> nextCreateRootParams = new HashMap<>();
     private final List<Tuple2<Entity, Entity>> entitiesChangedFromLastTurn = new ArrayList<>();
+    private Map<EntityType, Long> myHarvesterCountMap = new HashMap<>();                  // The number of harvesters per protein type I have
+    private Map<EntityType, Long> enemyHarvesterCountMap = new HashMap<>();               // The number of harvesters per protein type my enemy has
     private int myA;
     private int myB;
     private int myC;
@@ -201,6 +203,12 @@ class Player {
 
     private enum Direction {
         N, S, E, W
+    }
+
+    private static class Owner {
+        public static final int ME = 1;
+        public static final int ENEMY = 0;
+        public static final int NOBODY = -1;
     }
 
     private enum EntityType {
@@ -512,7 +520,7 @@ class Player {
                     .orElse(null);
 
             debug(String.format("%s Most attractive: %s", this, mostAttractive));
-            if(mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
+            if (mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
                 // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
                 nextCreateRootParams.put(rootId, mostAttractive);
                 Entity buildFrom = mostAttractive.from().myNeighbor();
@@ -535,7 +543,7 @@ class Player {
             if (nextRoot == null || !canBuild(Player.EntityType.ROOT)) {
                 return null;
             }
-            if(!nextRoot.to().isBuildable()) {
+            if (!nextRoot.to().isBuildable()) {
                 debug(String.format("%s Wanted to build new ROOT but %s was built on last turn", this, nextRoot.to()));
                 return null;
             }
@@ -553,7 +561,7 @@ class Player {
     private class ConsumeProteinBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            Player.EntityType buildType = getBuildableType();
+            Player.EntityType buildType = getArbitraryBuildableType();
             if (buildType == null) {
                 debug(this + " Can't afford any proteins");
                 return null;
@@ -611,7 +619,7 @@ class Player {
                 return null;
             }
             Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(Player.Entity::mine).findFirst().orElseThrow(IllegalStateException::new);
-            Player.EntityType buildType = getBuildableType();
+            Player.EntityType buildType = getArbitraryBuildableType();
             if (buildType == null) {
                 debug(this + " Can't afford any proteins");
                 return null;
@@ -628,7 +636,8 @@ class Player {
     private class ExpandToClosestProteinBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            // Get all proteins, exclude
+            // Get all proteins within distance 3
+            //
             return null;
         }
 
@@ -640,20 +649,28 @@ class Player {
     private interface Command {
         String getText();
 
-        Player.EntityType getBuildType();
+        default Player.EntityType getBuildType() {
+            return null;
+        }
 
+        // Called when the command is chosen to be executed. Can call ghostEntity() if it is creating a new entity.
         void updateState();
+
+        /**
+         * Used when we are creating an entity for next turn. Treat it like it exists so we make good decisions for organisms that
+         * still need to make a move.
+         */
+        default void ghostEntity(Entity from, Entity to, EntityType type, Direction direction) {
+            to.setType(type);
+            to.setOwner(Owner.ME);
+            to.setDirection(direction);
+        }
     }
 
     private record WaitCommand() implements Player.Command {
         @Override
         public String getText() {
             return "WAIT";
-        }
-
-        @Override
-        public Player.EntityType getBuildType() {
-            return null;
         }
 
         @Override
@@ -678,7 +695,7 @@ class Player {
 
         @Override
         public void updateState() {
-
+            ghostEntity(from, to, type, direction);
         }
     }
 
@@ -695,8 +712,7 @@ class Player {
 
         @Override
         public void updateState() {
-            to.setType(Player.EntityType.ROOT);
-            to.setOwner(1);
+            ghostEntity(from, to, EntityType.ROOT, null);
         }
     }
 
@@ -726,11 +742,10 @@ class Player {
         return commands;
     }
 
-    private EntityType getBuildableType() {
-        // The entities we can build in order of priority. If we are out of As, we can't build a BASIC, so need to fall back to other types.
+    private EntityType getArbitraryBuildableType() {
         Stream<EntityType> ENTITY_BUILD_TYPES = Stream.of(EntityType.BASIC, EntityType.SPORER, EntityType.TENTACLE, EntityType.HARVESTER);
-        return ENTITY_BUILD_TYPES.filter(Player.this::canBuild)
-                .findFirst()
+        return ENTITY_BUILD_TYPES.max(Comparator.comparingInt(this::buildCount))
+                .filter(this::canBuild)
                 .orElse(null);
     }
 
@@ -760,12 +775,16 @@ class Player {
     }
 
     private boolean canBuild(EntityType type) {
+        return buildCount(type) > 0;
+    }
+
+    private int buildCount(EntityType type) {
         return switch (type) {
-            case BASIC -> myA > 0;
-            case HARVESTER -> myC > 0 && myD > 0;
-            case TENTACLE -> myB > 0 && myC > 0;
-            case SPORER -> myB > 0 && myD > 0;
-            case ROOT -> myA > 0 && myB > 0 && myC > 0 && myD > 0;
+            case BASIC -> myA;
+            case HARVESTER -> Math.min(myC, myD);
+            case TENTACLE -> Math.min(myB, myC);
+            case SPORER -> Math.min(myB, myD);
+            case ROOT -> Math.min(Math.min(Math.min(myA, myB), myC), myD);
             default -> throw new IllegalArgumentException("Can't build type " + type);
         };
     }
@@ -792,25 +811,14 @@ class Player {
     }
 
     /**
-     * For now, return the furthest away entity.
-     */
-    private Entity findBestNewRootLocation(Entity sporer) {
-        return sporer.entitiesInFront()
-                .filter(Entity::isEmpty)
-                .filter(entity -> entity.myNeighbor() == null)
-                .max(distanceToComparator(sporer))
-                .orElse(null);
-    }
-
-    /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
     private double calculateRootAttractiveness(Entity source) {
         Double result = buildAttractiveness.get(source);
         return Optional.ofNullable(result).orElseGet(() ->
                 pathing.entitiesWithinDistance(source, 3)
-                .stream()
-                .reduce(0.0, (attractivenessSum, closeByEntity) -> attractivenessImpact(source, closeByEntity) + attractivenessSum, Double::sum)
+                        .stream()
+                        .reduce(0.0, (attractivenessSum, closeByEntity) -> attractivenessImpact(source, closeByEntity) + attractivenessSum, Double::sum)
         );
     }
 
@@ -870,10 +878,11 @@ class Player {
         grid.getEntitySet().forEach(Entity::reset);
         buildAttractiveness.clear();
         entitiesChangedFromLastTurn.clear();
+        myHarvesterCountMap.clear();
+        enemyHarvesterCountMap.clear();
     }
 
     private void postTurnLoad() {
-
         // Give parents their children
         entitiesById.values().forEach(entity -> entitiesById.get(entity.getParentId()).getChildren().add(entity));
 
@@ -891,6 +900,23 @@ class Player {
                 .distinct()
 //                .peek(entity -> debug("Reprocessing pathing for " + entity))
                 .forEach(entity -> pathing.generatePaths(entity));
+
+        myHarvesterCountMap = grid.myEntitiesStream()
+                .filter(entity -> entity.getType().equals(EntityType.HARVESTER))
+                .map(Entity::entityInFront)
+                .filter(entity -> entity != null && entity.getType().isProtein())
+                .distinct()
+                .map(Entity::getType)
+                .collect(Collectors.groupingBy(w -> w, Collectors.counting()));
+
+        enemyHarvesterCountMap = grid.getEntitySet().stream()
+                .filter(Entity::enemy)
+                .filter(entity -> entity.getType().equals(EntityType.HARVESTER))
+                .map(Entity::entityInFront)
+                .filter(entity -> entity != null && entity.getType().isProtein())
+                .distinct()
+                .map(Entity::getType)
+                .collect(Collectors.groupingBy(w -> w, Collectors.counting()));
     }
 
     private void start() {
@@ -912,7 +938,7 @@ class Player {
                 String type = in.next(); // WALL, ROOT, BASIC, TENTACLE, HARVESTER, SPORER, A, B, C, D
                 EntityType entityType = EntityType.valueOf(type);
                 Entity entity = grid.entityAt(x, y);
-                if(turn > 1 && !entityType.equals(entity.getOldType())) {
+                if (turn > 1 && !entityType.equals(entity.getOldType())) {
                     // Entity changed type between this turn and last, record a copy of change for later processing
                     // The first entry is a copy (the old value), second is the current value
                     entitiesChangedFromLastTurn.add(new Tuple2<>(new Entity(entity), entity));
@@ -937,11 +963,12 @@ class Player {
             myA = in.nextInt();
             myB = in.nextInt();
             myC = in.nextInt();
-            myD = in.nextInt(); // your protein stock
+            myD = in.nextInt();
             enemyA = in.nextInt();
             enemyB = in.nextInt();
             enemyC = in.nextInt();
-            enemyD = in.nextInt(); // opponent's protein stock
+            enemyD = in.nextInt();
+
             int requiredActionsCount = in.nextInt(); // your number of organisms, output an action for each one in any order
 
             postTurnLoad();

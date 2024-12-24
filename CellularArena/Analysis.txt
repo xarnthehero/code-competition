@@ -30,31 +30,34 @@ Need to track:
 Movement
 	Random placement should now look at how can we move towards the next protein
 	Need to know when to bust through a protein to open up a big area
+	    I can get boxed in easily
 	With a group of proteins that I can only harvest 1 of, analyze best one to harvest
+	When I need to build an arbitrary entity, prioritize types that I have a very large number of proteins for
 Sporer placement is terrible
-	Prioritize early in the game
+	Prioritize early in the game - after updates, not sure if this is needed, spore locations are working well
 [Done]	Check that we can afford a new root - 4+ of each resource?
 [Done]	Consult heat map
-		Can we optimize this to prevent rechecking?
+		    Can we optimize this to prevent rechecking?
+    Use existing sporer instead of creating new one if possible
 Attacking
 	When enemy has tentacle with empty space between, they will likely place another tentacle down - see if I can kill that one preemptively
 	If we are 2 spaces away from an enemy, we can look at putting down a tentacle
 Harvesting
-	We place harvesters on existing harvesting proteins
-	If we are out of A or B but can build a harvester, prioritize harvesting an A/B if possible instead of eating it
-	Multiple harvesters can be put down on the same turn for the same protein
+[Done]	We place harvesters on existing harvesting proteins
+[Done]	If we are out of A or B but can build a harvester, prioritize harvesting an A/B if possible instead of eating it (done by swapping order of behaviors)
+[Done]	Multiple harvesters can be put down on the same turn for the same protein
 Pathfinding
 [Done]	Map from every point to every other point - distance and best direction?
 [Done]	Need to reprocess portions when new walls are placed
-	    In the short term, can reprocess only a limited range of cells (within 5) of a new wall, longer distance pathing shouldn't matter if incorrect
+            In the short term, can reprocess only a limited range of cells (within 5) of a new wall, longer distance pathing shouldn't matter if incorrect
 Reconciliation
 [Done]	List of outgoing and incoming organisms?
-		This way I can readjust the map based on new walls, analyze what the enemy built last turn
+    		This way I can readjust the map based on new walls, analyze what the enemy built last turn
 Space Denial - late game this is what I'll need for closed maps
 	Maybe worth focusing on, if I get this right it will result in a win every time
 	Analyze if there is 1 space to control to cut off most of the map, plan centers around getting that space
 Tracking
-	Harvesters harvesting protein
+[Done]	Harvesters harvesting protein
 
 
 
