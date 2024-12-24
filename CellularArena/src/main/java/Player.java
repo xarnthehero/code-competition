@@ -16,6 +16,7 @@ class Player {
     private final List<Entity> myRoots = new ArrayList<>();
     private final Map<Entity, Double> buildAttractiveness = new HashMap<>();
     private final Map<Integer, AttractivenessResult> nextCreateRootParams = new HashMap<>();
+    private final List<Tuple2<Entity, Entity>> entitiesChangedFromLastTurn = new ArrayList<>();
     private int myA;
     private int myB;
     private int myC;
@@ -247,6 +248,7 @@ class Player {
         private int y;
         private Entity up, down, left, right;
         private EntityType type;
+        private EntityType oldType;
         private final List<Entity> children;
         private List<Entity> neighbors;
         private int owner;           // 1 for me, 2 for enemy, 0 for no one
@@ -259,7 +261,15 @@ class Player {
             reset();
         }
 
+        public Entity(Entity copy) {
+            this.x = copy.x;
+            this.y = copy.y;
+            this.type = copy.type;
+            this.children = new ArrayList<>(copy.children);
+        }
+
         public void reset() {
+            oldType = type;
             type = EntityType.EMPTY;
             children.clear();
             owner = -1;
@@ -295,6 +305,10 @@ class Player {
 
         public void setType(EntityType type) {
             this.type = type;
+        }
+
+        public EntityType getOldType() {
+            return oldType;
         }
 
         public List<Entity> getChildren() {
@@ -836,13 +850,13 @@ class Player {
         return Comparator.comparing(entity1 -> Math.abs(entity.getX() - entity1.getX()) + Math.abs(entity.getY() - entity1.getY()));
     }
 
-    private List<Behavior> bronzeLeague() {
+    private List<Behavior> silverLeagueBehaviors() {
         return Arrays.asList(new Behavior[]{
                 new AttackBehavior(),
                 new CreateNewRootBehavior(),
                 new CreateSporerBehavior(),
-                new ConsumeProteinBehavior(),
                 new BuildHarvesterBehavior(),
+                new ConsumeProteinBehavior(),
                 new FillRandomSpaceBehavior(),
                 new ExpandToClosestProteinBehavior(),
         });
@@ -855,6 +869,28 @@ class Player {
         rootIdToDescendents.clear();
         grid.getEntitySet().forEach(Entity::reset);
         buildAttractiveness.clear();
+        entitiesChangedFromLastTurn.clear();
+    }
+
+    private void postTurnLoad() {
+
+        // Give parents their children
+        entitiesById.values().forEach(entity -> entitiesById.get(entity.getParentId()).getChildren().add(entity));
+
+        myRoots.sort(Comparator.comparingInt(Entity::getId));
+
+        // Process changed entities - this will miss entities that were destroyed for now. I don't think they are needed yet.
+        // A() is the old value, B() the new
+        // Reprocess pathing for all changes in walls and their neighbors within n tiles
+        // If we start hitting processing timeouts, we can modify this behavior to reprocess fewer tiles or set a limit on search distance
+        int DISTANCE_TO_TO_REPROCESS = 3;
+        entitiesChangedFromLastTurn.stream()
+                .filter(tuple -> tuple.b().getType().equals(EntityType.WALL))
+                .map(Tuple2::b)
+                .flatMap(entity -> pathing.entitiesWithinDistance(entity, DISTANCE_TO_TO_REPROCESS).stream())
+                .distinct()
+//                .peek(entity -> debug("Reprocessing pathing for " + entity))
+                .forEach(entity -> pathing.generatePaths(entity));
     }
 
     private void start() {
@@ -876,6 +912,11 @@ class Player {
                 String type = in.next(); // WALL, ROOT, BASIC, TENTACLE, HARVESTER, SPORER, A, B, C, D
                 EntityType entityType = EntityType.valueOf(type);
                 Entity entity = grid.entityAt(x, y);
+                if(turn > 1 && !entityType.equals(entity.getOldType())) {
+                    // Entity changed type between this turn and last, record a copy of change for later processing
+                    // The first entry is a copy (the old value), second is the current value
+                    entitiesChangedFromLastTurn.add(new Tuple2<>(new Entity(entity), entity));
+                }
                 entity.setType(entityType);
                 entity.setOwner(in.nextInt()); // 1 if your organ, 0 if target organ, -1 if neither
                 if (entityType.equals(EntityType.ROOT)) {
@@ -893,8 +934,6 @@ class Player {
                 entitiesById.put(entity.getId(), entity);
                 rootIdToDescendents.computeIfAbsent(entity.getRootId(), k -> new ArrayList<>()).add(entity);
             }
-            // Give parents their children
-            entitiesById.values().forEach(entity -> entitiesById.get(entity.getParentId()).getChildren().add(entity));
             myA = in.nextInt();
             myB = in.nextInt();
             myC = in.nextInt();
@@ -905,11 +944,11 @@ class Player {
             enemyD = in.nextInt(); // opponent's protein stock
             int requiredActionsCount = in.nextInt(); // your number of organisms, output an action for each one in any order
 
-            myRoots.sort(Comparator.comparingInt(Entity::getId));
+            postTurnLoad();
 
             if (turn == 1) {
                 pathing.generatePaths();
-                behaviors.addAll(bronzeLeague());
+                behaviors.addAll(silverLeagueBehaviors());
             }
 
             getCommands(requiredActionsCount).stream()

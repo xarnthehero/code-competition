@@ -45,9 +45,10 @@ Harvesting
 	Multiple harvesters can be put down on the same turn for the same protein
 Pathfinding
 [Done]	Map from every point to every other point - distance and best direction?
-	Need to reprocess portions when new walls are placed
+[Done]	Need to reprocess portions when new walls are placed
+	    In the short term, can reprocess only a limited range of cells (within 5) of a new wall, longer distance pathing shouldn't matter if incorrect
 Reconciliation
-	List of outgoing and incoming organisms?
+[Done]	List of outgoing and incoming organisms?
 		This way I can readjust the map based on new walls, analyze what the enemy built last turn
 Space Denial - late game this is what I'll need for closed maps
 	Maybe worth focusing on, if I get this right it will result in a win every time
