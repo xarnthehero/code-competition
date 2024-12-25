@@ -650,6 +650,10 @@ class Player {
         @Override
         public void updateState() {
         }
+
+        public String toString() {
+            return String.format("[%.2f] WAIT", merit());
+        }
     }
 
     private record GrowCommand(int rootId, Player.Entity from, Player.Entity to, Player.EntityType type,
@@ -676,6 +680,10 @@ class Player {
         public void updateState() {
             to.grid().buildGhostEntity(to, type, direction);
         }
+
+        public String toString() {
+            return String.format("[%.2f] %s", merit(), getText());
+        }
     }
 
     private record SporeCommand(int rootId, Player.Entity from, Player.Entity to,
@@ -699,6 +707,10 @@ class Player {
         public void updateState() {
             to.grid().buildGhostEntity(to, EntityType.ROOT, null);
         }
+
+        public String toString() {
+            return String.format("[%.2f] %s", merit(), getText());
+        }
     }
 
     private List<Command> getCommands(int commandsNeeded) {
@@ -716,10 +728,8 @@ class Player {
                 timer.end(behavior);
             }
             debug("Commands considered:");
-            debug(possibleCommands.size());
-            debug(possibleCommands);
             for (Command command : possibleCommands) {
-                debug("\t" + command.toString());
+                debug("\t" + command);
             }
             Command bestCommand = possibleCommands.stream().max(Comparator.comparingDouble(Command::merit)).orElseThrow(() -> new IllegalStateException("No command found"));
             debug("Executing command " + bestCommand);
@@ -858,7 +868,7 @@ class Player {
 
     private double getRootMeritFromState(Entity newRoot) {
         // Give merit based on how many roots we have. Creating a second gives [0], a third gives [1], etc.
-        List<Double> ROOT_MERIT_BY_ENTITY_COUNT = Arrays.asList(8.0, 5.0, 3.0);
+        List<Double> ROOT_MERIT_BY_ENTITY_COUNT = Arrays.asList(12.0, 8.0, 4.0);
         int entities = myRoots.size();
         return entities < ROOT_MERIT_BY_ENTITY_COUNT.size() ? ROOT_MERIT_BY_ENTITY_COUNT.get(entities) : 0;
     }
@@ -901,8 +911,8 @@ class Player {
 
     private MeritResult getHarvesterExpandMeritResult(BuildEntityTuple tuple) {
         // Give merit based on how many harvesters we currently have of that type. With zero, give HARVESTER_MERIT[0], etc.
-        List<Double> HARVESTER_MERIT_LIST = Arrays.asList(8.0, 5.0, 3.0);
-        double DEFAULT_HARVESTER_MERIT = 2.0;
+        List<Double> HARVESTER_MERIT_LIST = Arrays.asList(8.0, 5.0);
+        double DEFAULT_HARVESTER_MERIT = 4.0;
         double PROTEIN_THRESHOLD = 20;
         EntityType protein = tuple.target().getType();
         int harvesterCount = myHarvesterCountMap.get(protein);
@@ -1103,7 +1113,7 @@ class Player {
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
             DebugCategory.GENERAL, true,
-            DebugCategory.TIMER, true
+            DebugCategory.TIMER, false
     );
 
     private void debug(Object message) {
