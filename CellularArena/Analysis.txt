@@ -22,16 +22,19 @@ Need to track:
 	harvester count on each protein type
 	heatmap of areas to go to - number of proteins within 3 spaces that I haven't harvested
 
+Interesting game seeds:
+[-3194626388501203500] Resources far away, 2 root jumps needed
+[-562798768321121100] Closed map, may resources, race for middle - good for space denial win
+[4881395176070566000] Large sparse map, running out
 
 
 
-
---12/22/24 Rank 112 analysis and improvement ideas--
+--12/22/24 Rank 112 Bronze analysis and improvement ideas--
 Movement
 	Random placement should now look at how can we move towards the next protein
 	Need to know when to bust through a protein to open up a big area - I can get boxed in easily
 [Done]	With a group of proteins that I can only harvest 1 of, analyze best one to harvest - going based on lowest harvester count
-[Done] When I need to build an arbitrary entity, prioritize types that I have a very large number of proteins for
+[Done]  When I need to build an arbitrary entity, prioritize types that I have a very large number of proteins for
 Sporer placement is terrible
 	Prioritize early in the game - after updates, not sure if this is needed, spore locations are working well
 [Done]	Check that we can afford a new root - 4+ of each resource?
@@ -72,11 +75,37 @@ Pathfinding Algorithm
 
 
 
+--12/24/24 Rank 177 Silver analysis and improvement ideas--
+Accomplished most of the previous list.
+Notes about current state:
+    I don't expand towards proteins I need
+    My random movement doesn't go over proteins, so I get boxed in easily
+    I sometimes lose because I get to a protein I need, but don't have enough to create a harvester and have to consume it
+    I'm still only fighting when enemies are two cells away instead of three or four
+    Expansion of new roots is good, likely much better than others my rank
+    I ran into some trouble running out of processing time likely due to the pathing algorithm. Reduced the search depth, should be fine. May need to optimize down the road.
+    If I run into any more timeouts, I need to add timers to pieces of the code to evaluate how long different pieces are taking
+    I lose some games due to not recognizing that the board is locked and I need to take all spaces, no longer need to harvest proteins
+    There are a couple of asserts now so bugs get detected more easily
 
-
-
-
-
+Action Plan:
+Behavior Scores
+    I can move each behavior to giving a score, similar to the new spore / root attractiveness score. This way I can have an organism
+    try a couple behaviors and pick the highest scoring. This will help in situations where I COULD create a harvester in the beginning
+    of the game, but really it is important to build towards the middle for map control, etc. The build algorithm would recognise the
+    importance of expansion and give a high score, while the harvester attractiveness score would be more standard.
+Movement
+    Need to have a prioritization plan similar to new root expansion.
+    If there are very few of a protein on the map, give importance there
+    In general, prioritize moving towards the enemies part of the map unless they can fight and we can't
+    Need a couple of D harvesters (1-2?), many Bs and Cs for fighting.
+    Cs double up on harvesters and tentacles, both important. Bs are needed for sporers, not as important, especially as the game moves on.
+Attacking
+    If I can't fight, don't expand towards the enemy. People's algorithms will typically fight when I come close.
+    Start fighting two spaces away.
+Map Control
+    On closed maps, take over the 2-3 points needed to win the game as early as possible
+    Need code to calculate a couple jumps ahead, what resources are required to get to those choke points
 
 
 
