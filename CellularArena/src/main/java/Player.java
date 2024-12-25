@@ -253,8 +253,8 @@ class Player {
                 myNeighbor.getType().equals(EntityType.HARVESTER)
                         && myNeighbor.directionTo(entity).equals(myNeighbor.getDirection())) != null;
         public static final Predicate<Entity> SHOOT_ROOT_OVER = entity -> entity.getType().isProtein() || entity.getType().equals(EntityType.EMPTY);
-        public static final Predicate<Entity> ENEMY_ATTACKING = entity -> entity.neighborsStream()
-                .anyMatch(enemy -> enemy.enemy() && enemy.getType().equals(EntityType.TENTACLE) && enemy.entityInFront() == entity);
+        public static final Predicate<Entity> ENEMY_NOT_ATTACKING = entity -> entity.neighborsStream()
+                .noneMatch(enemy -> enemy.enemy() && enemy.getType().equals(EntityType.TENTACLE) && enemy.entityInFront() == entity);
     }
 
     private class Entity {
@@ -486,7 +486,7 @@ class Player {
                 return null;
             }
             List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy)
-                    .stream().filter(buildEntityTuple -> !EntityPredicates.ENEMY_ATTACKING.test(buildEntityTuple.buildableTile())).toList();
+                    .stream().filter(buildEntityTuple -> EntityPredicates.ENEMY_NOT_ATTACKING.test(buildEntityTuple.buildableTile())).toList();
             if (possibleAttacks.isEmpty()) {
                 return null;
             }
@@ -617,7 +617,7 @@ class Player {
         public Player.Command getCommand(int rootId) {
             Player.Entity targetEntity = grid.adjacentToMine(rootId)
                     .filter(entity -> entity.getType().equals(Player.EntityType.EMPTY))
-                    .filter(entity -> !EntityPredicates.ENEMY_ATTACKING.test(entity))
+                    .filter(EntityPredicates.ENEMY_NOT_ATTACKING)
                     .min(distanceToComparator(grid.midPoint())).orElse(null);
             if (targetEntity == null) {
                 return null;
@@ -674,9 +674,7 @@ class Player {
             to.setType(type);
             to.setOwner(Owner.ME);
             to.setDirection(direction);
-            if(EntityPredicates.ENEMY_ATTACKING.test(to)) {
-                throw new IllegalArgumentException("Trying to build where an enemy is attacking (" + to + "), fix that situation!");
-            }
+            myAssert(EntityPredicates.ENEMY_NOT_ATTACKING.test(to), "Trying to build where an enemy is attacking (" + to + ")");
         }
     }
 
@@ -764,8 +762,8 @@ class Player {
             spendProtein(command.getBuildType());
             command.updateState();
             Entity buildFrom = command.getBuildFrom();
-            if(buildFrom != null && buildFrom.getRootId() != command.rootId()) {
-                throw new IllegalStateException(String.format("It is root %s's turn but we are producing from %s with root id %s", command.rootId(), buildFrom, buildFrom.getRootId()));
+            if(buildFrom != null) {
+                myAssert(buildFrom.getRootId() == command.rootId(), String.format("It is root %s's turn but we are producing from %s with root id %s", command.rootId(), buildFrom, buildFrom.getRootId()));
             }
             commands.add(command);
         }
@@ -795,7 +793,9 @@ class Player {
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
         List<Entity> buildableTiles = grid.adjacentToMine(rootId)
                 .filter(Entity::isBuildable)
-                .distinct().toList();
+                .filter(EntityPredicates.ENEMY_NOT_ATTACKING)
+                .distinct()
+                .toList();
         List<BuildEntityTuple> tuples = new ArrayList<>();
         for (Entity emptyTile : buildableTiles) {
             emptyTile.neighborsStream().filter(targetPredicate).forEach(target -> {
@@ -866,7 +866,7 @@ class Player {
 
         return sporeDirectionStream
                 .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
-                .filter(result -> !EntityPredicates.ENEMY_ATTACKING.test(result.to()))
+                .filter(result -> !EntityPredicates.ENEMY_NOT_ATTACKING.test(result.to()))
                 .map(result -> {
                     double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
                     double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
@@ -992,7 +992,7 @@ class Player {
         int height = in.nextInt(); // rows in the game grid
 
         grid = new Grid(width, height);
-        pathing = new Pathing(20);
+        pathing = new Pathing(Math.max(width, height));
 
         // game loop
         while (true) {
@@ -1061,7 +1061,7 @@ class Player {
         }
     }
 
-    public void myAssert(boolean b, String message) {
+    public static void myAssert(boolean b, String message) {
         if (!b) {
             throw new RuntimeException(message);
         }
