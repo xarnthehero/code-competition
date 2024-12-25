@@ -14,8 +14,8 @@ class Player {
     private final HashMap<Integer, Entity> entitiesById = new HashMap<>();
     private final HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
     private final List<Entity> myRoots = new ArrayList<>();
-    private final Map<Entity, Double> buildAttractiveness = new HashMap<>();
-    private final Map<Integer, AttractivenessResult> nextCreateRootParams = new HashMap<>();
+    private final Map<Entity, Double> buildMERIT = new HashMap<>();
+    private final Map<Integer, MeritResult> nextCreateRootParams = new HashMap<>();
     private final List<Tuple2<Entity, Entity>> entitiesChangedFromLastTurn = new ArrayList<>();
     private Map<EntityType, Long> myHarvesterCountMap = new HashMap<>();                  // The number of harvesters per protein type I have
     private Map<EntityType, Long> enemyHarvesterCountMap = new HashMap<>();               // The number of harvesters per protein type my enemy has
@@ -490,7 +490,7 @@ class Player {
                 return null;
             }
             BuildEntityTuple ggNoob = possibleAttacks.stream().max(Comparator.comparingInt(buildEntityTuple -> buildEntityTuple.target().descendentCount())).get();
-            return new GrowCommand(rootId, ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.target()));
+            return new GrowCommand(rootId, ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.target()), 1.0);
         }
 
         public String toString() {
@@ -508,16 +508,16 @@ class Player {
             if (!canBuild(EntityType.SPORER) || !shouldConsiderNewRoot()) {
                 return null;
             }
-            AttractivenessResult mostAttractive = getRootExpandLocation(rootId, false);
+            MeritResult mostMerit = getRootExpandLocation(rootId, false);
 
-//            debug(String.format("%s Most attractive: %s", this, mostAttractive));
-            if (mostAttractive != null && shouldExpand(mostAttractive.attractiveness())) {
+//            debug(String.format("%s Most Merit: %s", this, mostMerit));
+            if (mostMerit != null && shouldExpand(mostMerit.merit())) {
                 // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
-                nextCreateRootParams.put(rootId, mostAttractive);
-                Entity buildFrom = mostAttractive.from().myNeighbor(rootId);
-                Entity buildTo = mostAttractive.from();
-                Direction direction = mostAttractive.from().directionTo(mostAttractive.to());
-                return new GrowCommand(rootId, buildFrom, buildTo, EntityType.SPORER, direction);
+                nextCreateRootParams.put(rootId, mostMerit);
+                Entity buildFrom = mostMerit.from().myNeighbor(rootId);
+                Entity buildTo = mostMerit.from();
+                Direction direction = mostMerit.from().directionTo(mostMerit.to());
+                return new GrowCommand(rootId, buildFrom, buildTo, EntityType.SPORER, direction, 1.0);
             }
             return null;
         }
@@ -530,13 +530,13 @@ class Player {
     private class CreateNewRootBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
-            AttractivenessResult nextRoot = nextCreateRootParams.remove(rootId);
+            MeritResult nextRoot = nextCreateRootParams.remove(rootId);
             if (nextRoot == null) {
                 // Didn't create a sporer last turn with the intent to create a new root this turn.
                 // See if we have an existing sporer that would make sense to create a new root.
                 if (shouldConsiderNewRoot()) {
-                    AttractivenessResult result = getRootExpandLocation(rootId, true);
-                    if (result != null && shouldExpand(result.attractiveness())) {
+                    MeritResult result = getRootExpandLocation(rootId, true);
+                    if (result != null && shouldExpand(result.merit())) {
                         nextRoot = result;
                     }
                 }
@@ -548,7 +548,7 @@ class Player {
                 debug(String.format("%s Wanted to build new ROOT but %s was built on last turn", this, nextRoot.to()));
                 return null;
             }
-            return new Player.SporeCommand(rootId, nextRoot.from(), nextRoot.to());
+            return new Player.SporeCommand(rootId, nextRoot.from(), nextRoot.to(), nextRoot.merit);
         }
 
         public String toString() {
@@ -564,7 +564,6 @@ class Player {
         public Player.Command getCommand(int rootId) {
             Player.EntityType buildType = getArbitraryBuildableType();
             if (buildType == null) {
-                debug(this + " Can't afford any proteins");
                 return null;
             }
             for (EntityType proteinType : Arrays.asList(Player.EntityType.A, Player.EntityType.B, Player.EntityType.C, Player.EntityType.D)) {
@@ -574,7 +573,7 @@ class Player {
                 for (Entity protein : grid.getEntitySet().stream().filter(entity -> entity.getType().equals(proteinType)).toList()) {
                     Entity myNeighbor = protein.myNeighbor(rootId);
                     if (myNeighbor != null && !EntityPredicates.HARVESTED_BY_ME.test(protein)) {
-                        return new Player.GrowCommand(rootId, myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein));
+                        return new Player.GrowCommand(rootId, myNeighbor, protein, buildType, buildType.equals(Player.EntityType.BASIC) ? null : myNeighbor.directionTo(protein), 1.0);
                     }
                 }
             }
@@ -602,7 +601,7 @@ class Player {
             BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(
                     notHarvestingComparator.thenComparingLong(value -> Optional.ofNullable(myHarvesterCountMap.get(value.target().getType())).orElse(0L))
             ).get();
-            return new GrowCommand(rootId, harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()));
+            return new GrowCommand(rootId, harvesterToBuild.mine(), harvesterToBuild.buildableTile(), EntityType.HARVESTER, harvesterToBuild.buildableTile().directionTo(harvesterToBuild.target()), 1.0);
         }
 
         public String toString() {
@@ -610,46 +609,55 @@ class Player {
         }
     }
 
+    private class ExpandToSpaceBehavior implements Player.Behavior {
+        @Override
+        public Command getCommand(int rootId) {
+            return null;
+        }
+    }
+
     private class FillRandomSpaceBehavior implements Player.Behavior {
         @Override
         public Player.Command getCommand(int rootId) {
+            // On turn 70, start building on proteins as well to fill up map
+            Predicate<Entity> buildOnFilter = turn < 70 ?
+                    entity -> entity.getType().equals(Player.EntityType.EMPTY) && EntityPredicates.ENEMY_NOT_ATTACKING.test(entity)
+                    : Entity::isBuildable;
+
             Player.Entity targetEntity = grid.adjacentToMine(rootId)
-                    .filter(entity -> entity.getType().equals(Player.EntityType.EMPTY))
-                    .filter(EntityPredicates.ENEMY_NOT_ATTACKING)
+                    .filter(buildOnFilter)
                     .min(distanceToComparator(grid.midPoint())).orElse(null);
             if (targetEntity == null) {
                 return null;
             }
-            Player.Entity closestOwnedEntity = targetEntity.neighborsStream().filter(entity -> entity.getRootId() == rootId).findFirst().orElseThrow(IllegalStateException::new);
+            Player.Entity closestOwnedEntity = targetEntity.myNeighbor(rootId);
             Player.EntityType buildType = getArbitraryBuildableType();
             if (buildType == null) {
-                debug(this + " Can't afford any proteins");
                 return null;
             }
-            return new Player.GrowCommand(rootId, closestOwnedEntity, targetEntity, buildType, buildType.equals(Player.EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity));
+            return new GrowCommand(rootId, closestOwnedEntity, targetEntity, buildType, buildType.equals(EntityType.BASIC) ? null : closestOwnedEntity.directionTo(targetEntity), 1.0);
         }
 
         public String toString() {
-            return "[Fill Random Space]";
+            return "[Fill Random Space Behavior]";
         }
     }
 
-
-    private class ExpandToClosestProteinBehavior implements Player.Behavior {
+    private static class WaitBehavior implements Player.Behavior {
         @Override
-        public Player.Command getCommand(int rootId) {
-            // Get all proteins within distance 3
-            //
-            return null;
+        public Command getCommand(int rootId) {
+            return new WaitCommand(rootId);
         }
 
         public String toString() {
-            return "[Expand To Closest Protein Behavior]";
+            return "[Wait Behavior]";
         }
     }
 
     private interface Command {
         String getText();
+
+        double merit();
 
         default Player.EntityType getBuildType() {
             return null;
@@ -683,6 +691,11 @@ class Player {
         }
 
         @Override
+        public double merit() {
+            return 0;
+        }
+
+        @Override
         public void updateState() {
         }
 
@@ -690,7 +703,7 @@ class Player {
     }
 
     private record GrowCommand(int rootId, Player.Entity from, Player.Entity to, Player.EntityType type,
-                               Player.Direction direction) implements Player.Command {
+                               Player.Direction direction, double merit) implements Player.Command {
         @Override
         public String getText() {
             if (direction != null) {
@@ -715,7 +728,7 @@ class Player {
         }
     }
 
-    private record SporeCommand(int rootId, Player.Entity from, Player.Entity to) implements Player.Command {
+    private record SporeCommand(int rootId, Player.Entity from, Player.Entity to, double merit) implements Player.Command {
         @Override
         public String getText() {
             return String.format("SPORE %s %s %s%s", from.getId(), to.getX(), to.getY(), showRootIdOnCommand ? " " + rootId + " SPORE" : "");
@@ -744,26 +757,20 @@ class Player {
         for (int i = commandsNeeded - 1; i >= 0; i--) {
             Entity currentRoot = myRoots.get(i);
             currentRootId = currentRoot.getId();
-            Command command = null;
+            List<Command> possibleCommands = new ArrayList<>();
             for (Behavior behavior : behaviors) {
-                command = behavior.getCommand(currentRoot.getRootId());
-                if (command != null) {
-                    debug("Current behavior: " + behavior);
-                    break;
-                }
+                Optional.ofNullable(behavior.getCommand(currentRoot.getRootId()))
+                        .ifPresent(possibleCommands::add);
             }
-            if (command == null) {
-                command = new WaitCommand(currentRoot.getId());
-                debug("Falling back to default " + command);
-            }
-            debug("Executing command " + command);
-            spendProtein(command.getBuildType());
-            command.updateState();
-            Entity buildFrom = command.getBuildFrom();
+            Command bestCommand = possibleCommands.stream().max(Comparator.comparingDouble(Command::merit)).orElseThrow(() -> new IllegalStateException("No command found"));
+            debug("Executing command " + bestCommand);
+            spendProtein(bestCommand.getBuildType());
+            bestCommand.updateState();
+            Entity buildFrom = bestCommand.getBuildFrom();
             if(buildFrom != null) {
-                myAssert(buildFrom.getRootId() == command.rootId(), String.format("It is root %s's turn but we are producing from %s with root id %s", command.rootId(), buildFrom, buildFrom.getRootId()));
+                myAssert(buildFrom.getRootId() == bestCommand.rootId(), String.format("It is root %s's turn but we are producing from %s with root id %s", bestCommand.rootId(), buildFrom, buildFrom.getRootId()));
             }
-            commands.add(command);
+            commands.add(bestCommand);
         }
         currentRootId = null;
         return commands;
@@ -779,7 +786,7 @@ class Player {
     private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) {
     }
 
-    private record AttractivenessResult(Entity from, Direction direction, Entity to, Double attractiveness) {
+    private record MeritResult(Entity from, Direction direction, Entity to, Double merit) {
     }
 
     public record Tuple2<A, B>(A a, B b) {
@@ -844,17 +851,17 @@ class Player {
      *                         to create a spore, then spawn a root next turn.
      * @return The result of all possibilities for new ROOT expansion
      */
-    private AttractivenessResult getRootExpandLocation(int rootId, boolean useExistingSpore) {
-        double ATTRACTIVENESS_PER_DISTANCE = .5;
-        Function<Entity, Stream<AttractivenessResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new AttractivenessResult(entity, direction, null, null));
+    private MeritResult getRootExpandLocation(int rootId, boolean useExistingSpore) {
+        double MERIT_PER_DISTANCE = .5;
+        Function<Entity, Stream<MeritResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new MeritResult(entity, direction, null, null));
 
         // Stream with the place we want to place a spore and its direction
-        Stream<AttractivenessResult> sporeDirectionStream;
+        Stream<MeritResult> sporeDirectionStream;
         if (useExistingSpore) {
             sporeDirectionStream = grid.myEntitiesStream()
                     .filter(entity -> entity.getRootId() == rootId)
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
-                    .map(entity -> new AttractivenessResult(entity, entity.getDirection(), null, null));
+                    .map(entity -> new MeritResult(entity, entity.getDirection(), null, null));
         } else {
             sporeDirectionStream = grid.adjacentToMine(rootId)
                     .filter(Entity::isBuildable)
@@ -862,31 +869,31 @@ class Player {
         }
 
         return sporeDirectionStream
-                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
+                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new MeritResult(result.from(), result.direction(), potentialRootTile, null)))
                 .filter(result -> EntityPredicates.ENEMY_NOT_ATTACKING.test(result.to()))
                 .map(result -> {
-                    double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
-                    double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());
-                    return new AttractivenessResult(result.from(), result.direction(), result.to(), totalAttractiveness);
+                    double buildLocationMERIT = calculateRootMERIT(result.to());
+                    double totalMERIT = buildLocationMERIT + MERIT_PER_DISTANCE * pathing.distance(result.from(), result.to());
+                    return new MeritResult(result.from(), result.direction(), result.to(), totalMERIT);
                 })
-//                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.attractiveness(), result.from(), result.direction(), result.to())))
-                .max(Comparator.comparingDouble(AttractivenessResult::attractiveness))
+//                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.merit(), result.from(), result.direction(), result.to())))
+                .max(Comparator.comparingDouble(MeritResult::merit))
                 .orElse(null);
     }
 
     /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
-    private double calculateRootAttractiveness(Entity source) {
-        Double result = buildAttractiveness.get(source);
+    private double calculateRootMERIT(Entity source) {
+        Double result = buildMERIT.get(source);
         return Optional.ofNullable(result).orElseGet(() ->
                 pathing.entitiesWithinDistance(source, 3)
                         .stream()
-                        .reduce(0.0, (attractivenessSum, closeByEntity) -> attractivenessImpact(source, closeByEntity) + attractivenessSum, Double::sum)
+                        .reduce(0.0, (MERITSum, closeByEntity) -> MERITImpact(source, closeByEntity) + MERITSum, Double::sum)
         );
     }
 
-    private double attractivenessImpact(Entity source, Entity closeByEntity) {
+    private double MERITImpact(Entity source, Entity closeByEntity) {
         double ZERO_FROM_PROTEIN = .5;
         double ONE_FROM_PROTEIN = .25;
         double TWO_FROM_PROTEIN = 1;
@@ -894,9 +901,9 @@ class Player {
         double FRIENDLY_WITHIN_THREE = -3;
 
         int distance = pathing.distance(source, closeByEntity);
-        double attractivenessImpact = 0;
+        double MERITImpact = 0;
         if (closeByEntity.getType().isProtein()) {
-            attractivenessImpact += switch (distance) {
+            MERITImpact += switch (distance) {
                 case 0 -> ZERO_FROM_PROTEIN;
                 case 1 -> ONE_FROM_PROTEIN;
                 case 2 -> TWO_FROM_PROTEIN;
@@ -904,9 +911,9 @@ class Player {
                 default -> 0;
             };
         } else if (closeByEntity.mine()) {
-            attractivenessImpact += FRIENDLY_WITHIN_THREE;
+            MERITImpact += FRIENDLY_WITHIN_THREE;
         }
-        return attractivenessImpact;
+        return MERITImpact;
     }
 
     private boolean shouldConsiderNewRoot() {
@@ -914,8 +921,8 @@ class Player {
         return Stream.of(myA, myB, myC, myD).allMatch(integer -> integer >= MIN_EXPAND_PROTEIN);
     }
 
-    private boolean shouldExpand(double attractiveness) {
-        return attractiveness >= 4;
+    private boolean shouldExpand(double MERIT) {
+        return MERIT >= 4;
     }
 
     private Comparator<Entity> distanceToComparator(Entity entity) {
@@ -930,7 +937,7 @@ class Player {
                 new BuildHarvesterBehavior(),
                 new ConsumeProteinBehavior(),
                 new FillRandomSpaceBehavior(),
-                new ExpandToClosestProteinBehavior(),
+                new WaitBehavior(),
         });
     }
 
@@ -940,7 +947,7 @@ class Player {
         entitiesById.clear();
         rootIdToDescendents.clear();
         grid.getEntitySet().forEach(Entity::reset);
-        buildAttractiveness.clear();
+        buildMERIT.clear();
         entitiesChangedFromLastTurn.clear();
         myHarvesterCountMap.clear();
         enemyHarvesterCountMap.clear();
