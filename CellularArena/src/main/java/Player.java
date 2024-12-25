@@ -453,7 +453,7 @@ class Player {
         }
 
         public boolean isBuildable() {
-            return isEmpty() || type.isProtein();
+            return (isEmpty() || type.isProtein()) && EntityPredicates.ENEMY_NOT_ATTACKING.test(this);
         }
 
         public Player.Direction directionTo(Entity other) {
@@ -485,8 +485,7 @@ class Player {
             if (!canBuild(EntityType.TENTACLE)) {
                 return null;
             }
-            List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy)
-                    .stream().filter(buildEntityTuple -> EntityPredicates.ENEMY_NOT_ATTACKING.test(buildEntityTuple.buildableTile())).toList();
+            List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy);
             if (possibleAttacks.isEmpty()) {
                 return null;
             }
@@ -537,7 +536,6 @@ class Player {
                 // See if we have an existing sporer that would make sense to create a new root.
                 if (shouldConsiderNewRoot()) {
                     AttractivenessResult result = getRootExpandLocation(rootId, true);
-                    debug("Attractiveness result for root id " + rootId + ": " + result);
                     if (result != null && shouldExpand(result.attractiveness())) {
                         nextRoot = result;
                     }
@@ -793,7 +791,6 @@ class Player {
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
         List<Entity> buildableTiles = grid.adjacentToMine(rootId)
                 .filter(Entity::isBuildable)
-                .filter(EntityPredicates.ENEMY_NOT_ATTACKING)
                 .distinct()
                 .toList();
         List<BuildEntityTuple> tuples = new ArrayList<>();
@@ -860,13 +857,13 @@ class Player {
                     .map(entity -> new AttractivenessResult(entity, entity.getDirection(), null, null));
         } else {
             sporeDirectionStream = grid.adjacentToMine(rootId)
-                    .filter(Entity::isEmpty)
+                    .filter(Entity::isBuildable)
                     .flatMap(entityToDirectionTupleMapper);
         }
 
         return sporeDirectionStream
                 .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new AttractivenessResult(result.from(), result.direction(), potentialRootTile, null)))
-                .filter(result -> !EntityPredicates.ENEMY_NOT_ATTACKING.test(result.to()))
+                .filter(result -> EntityPredicates.ENEMY_NOT_ATTACKING.test(result.to()))
                 .map(result -> {
                     double buildLocationAttractiveness = calculateRootAttractiveness(result.to());
                     double totalAttractiveness = buildLocationAttractiveness + ATTRACTIVENESS_PER_DISTANCE * pathing.distance(result.from(), result.to());

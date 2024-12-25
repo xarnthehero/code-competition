@@ -23,10 +23,15 @@ Need to track:
 	heatmap of areas to go to - number of proteins within 3 spaces that I haven't harvested
 
 Interesting game seeds:
-[-3194626388501203500] Resources far away, 2 root jumps needed
-[-562798768321121100] Closed map, may resources, race for middle - good for space denial win
-[4881395176070566000] Large sparse map, running out
-
+Resources far away, 2 root jumps needed
+    -3194626388501203500
+Closed map, may resources, race for middle - good for space denial win
+    -562798768321121100
+    6812241268562684000
+Large sparse map, running out
+    4881395176070566000
+Large plentiful map
+    2855407559329172500
 
 
 --12/22/24 Rank 112 Bronze analysis and improvement ideas--
