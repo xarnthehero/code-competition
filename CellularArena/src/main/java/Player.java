@@ -522,7 +522,7 @@ class Player {
             MeritResult mostMerit = getRootExpandLocation(rootId, false);
 
 //            debug(String.format("%s Most Merit: %s", this, mostMerit));
-            if (mostMerit != null && shouldExpand(mostMerit.merit())) {
+            if (mostMerit != null) {
                 // Store what we found here to prevent calculations next turn, assume it is still good. Will modify this if I observe problems with using the cached value.
                 Entity buildFrom = mostMerit.from().myNeighbor(rootId);
                 Entity buildTo = mostMerit.from();
@@ -853,6 +853,47 @@ class Player {
                 .orElse(null);
     }
 
+    // These are the knobs we can turn to influence decision-making
+    public static class Merit {
+        // --- New Root ---
+        // Give this much merit per space the root is from the sporer
+        public static final double NEW_ROOT_MERIT_PER_DISTANCE_FROM_SPORER = .3;
+        // Don't give extra bonus after this many spaces, it may shove us in a corner instead of a better spot
+        public static final double NEW_ROOT_MERIT_MAX_DISTANCE_FOR_BONUS = 10;
+        // The first new ROOT gives [0], second [1], etc
+        public static final List<Double> NEW_ROOT_MERIT_BY_ENTITY_COUNT = Arrays.asList(12.0, 8.0, 4.0);
+        // Merit for new ROOTs after the above benefits are exhausted
+        public static final double NEW_ROOT_MERIT_DEFAULT = 0;
+
+        public static final List<Double> NEW_ROOT_MERIT_FROM_PROTEIN_BY_DISTANCE = Arrays.asList(.5, .25, 1.0, .25);
+        public static final double NEW_ROOT_MERIT_FROM_FRIENDLY_WITHIN_THREE_DISTANCE = -3;
+
+        // -- New Harvester --
+        // Same as above, first harvester of this protein type gets [0], etc
+        public static final List<Double> NEW_HARVESTER_MERIT_BY_ENTITY_COUNT = Arrays.asList(8.0, 5.0);
+        // Default merit count of harvesters of a protein type after the 2nd
+        public static final double HARVESTER_MERIT_DEFAULT = 4.0;
+        // Depending on how badly we need a protein, give a multiplier between the blow values ( _MIN_ to _MAX_, linearly scaling from 0 to the below value)
+        // For example, given the below 3 values of 20, 2, .5, if we have 6 of that protein, give a (20-6)/20 * (2-.5) + .5 = 1.55 multiplier because we are relatively low
+        // Having 20 would give the min of (20-20)/20 * (2-.5) + .5 = .5
+        public static final double NEW_HARVESTER_PROTEIN_THRESHOLD = 20;
+        public static final double NEW_HARVESTER_MAX_PROTEIN_MERIT = 5;
+        public static final double NEW_HARVESTER_MIN_PROTEIN_MERIT = 0;
+
+        // --New Arbitrary Expansion --
+        // Same as above. The multiplier is applied per protein and is divided by the distances to that protein.
+        public static final double NEW_EXPANSION_TO_PROTEIN_THRESHOLD = 20;
+        public static final double NEW_EXPANSION_TO_PROTEIN_MAX_PROTEIN_MULTIPLIER = 2;
+        public static final double NEW_EXPANSION_TO_PROTEIN_MIN_PROTEIN_MULTIPLIER = 0;
+
+        // Consuming my own harvested protein as part of expansion gives this negative merit
+        public static final double NEW_EXPANSION_CONSUME_HARVESTED_PROTEIN_MERIT = -4;
+        // Late game (turn 70+) when the field is likely locked up, increase merit of taking spaces (harvested proteins)
+        public static final double NEW_EXPANSION_LATE_GAME_EXPAND_MERIT = 5;
+        // Merit bonus when I'm out of a protein and can consume one
+        public static final double NEW_EXPANSION_NEED_PROTEIN_MERIT = 3;
+    }
+
     /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
@@ -866,104 +907,83 @@ class Player {
     }
 
     private double getRootMeritWithSource(Entity from, Entity newRoot) {
-        double MERIT_PER_DISTANCE = .3;
-        double MAX_DISTANCE = 10;       // Don't give extra bonus after this many spaces, it may shove us in a corner instead of a better spot
-        return MERIT_PER_DISTANCE * Math.min(pathing.distance(from, newRoot), MAX_DISTANCE);
+        return Merit.NEW_ROOT_MERIT_PER_DISTANCE_FROM_SPORER * Math.min(pathing.distance(from, newRoot), Merit.NEW_ROOT_MERIT_MAX_DISTANCE_FOR_BONUS);
     }
 
     private double getRootMeritFromState(Entity newRoot) {
         // Give merit based on how many roots we have. Creating a second gives [0], a third gives [1], etc.
-        List<Double> ROOT_MERIT_BY_ENTITY_COUNT = Arrays.asList(12.0, 8.0, 4.0);
         int entities = myRoots.size();
-        return entities < ROOT_MERIT_BY_ENTITY_COUNT.size() ? ROOT_MERIT_BY_ENTITY_COUNT.get(entities) : 0;
+        return entities < Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.size() ? Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.get(entities) : Merit.NEW_ROOT_MERIT_DEFAULT;
     }
 
     private double calculateExpandMerit(Entity source) {
+//        debug("Calculating merit for " + source + ":");
         return expandMeritMap.computeIfAbsent(source, entity -> grid.getProteins().stream()
                 .mapToDouble(protein -> getNearbyProteinExpandMerit(entity, protein))
                 .sum() + getLocationExpandMerit(source)
         );
     }
 
+    // Gives the amount of merit for expanding to source given the fact that a given protein entity is nearby
     private double getNearbyProteinExpandMerit(Entity source, Entity protein) {
         myAssert(protein.getType().isProtein(), protein + " is not a protein");
         Integer distance = pathing.distance(source, protein);
         if (distance == null || distance > 6) {
             return 0;
         }
-        // Harvester count - give importance for lack of harvesters, up to 3 (at which point we don't need this protein much)
-        // Protein count - lack of this protein up to 20
-        double HARVESTER_THRESHOLD = 3;
-        double PROTEIN_THRESHOLD = 20;
-        double CONSTANT_MULTIPLIER = 3;
-        int harvesters = myHarvesterCountMap.get(protein.getType());
+
+        // Don't give additional bonus to proteins that are 1 away
+        distance = Math.max(2, distance);
         int proteinCount = getProteinCount(protein.getType());
-        double harvesterMultiplier = 1 - Math.min(harvesters, HARVESTER_THRESHOLD) / PROTEIN_THRESHOLD;
-        double proteinMultiplier = 1 - Math.min(proteinCount, PROTEIN_THRESHOLD) / PROTEIN_THRESHOLD;
-        double totalMerit = harvesterMultiplier * proteinMultiplier / distance * CONSTANT_MULTIPLIER;
+        double proteinMultiplier = linearlyScaledPercent(proteinCount, Merit.NEW_EXPANSION_TO_PROTEIN_THRESHOLD, Merit.NEW_EXPANSION_TO_PROTEIN_MIN_PROTEIN_MULTIPLIER, Merit.NEW_EXPANSION_TO_PROTEIN_MAX_PROTEIN_MULTIPLIER);
+        double totalMerit = proteinMultiplier / distance;
+//        debug(String.format("\t%.2f merit from %s", totalMerit, protein));
         return totalMerit;
     }
 
     private double getLocationExpandMerit(Entity source) {
-        double HARVESTED_MERIT = -2;
-        double LATE_GAME_EXPAND_MERIT = 3;
-        double NEED_PROTEIN = 5;
-        return (EntityPredicates.HARVESTED_BY_ME.test(source) ? HARVESTED_MERIT : 0)
-                + (turn >= 70 ? LATE_GAME_EXPAND_MERIT : 0)
-                + (source.getType().isProtein() && getProteinCount(source.getType()) == 0 ? NEED_PROTEIN : 0)
+        return (EntityPredicates.HARVESTED_BY_ME.test(source) ? Merit.NEW_EXPANSION_CONSUME_HARVESTED_PROTEIN_MERIT : 0)
+                + (turn >= 70 ? Merit.NEW_EXPANSION_LATE_GAME_EXPAND_MERIT : 0)
+                + (source.getType().isProtein() && getProteinCount(source.getType()) == 0 ? Merit.NEW_EXPANSION_NEED_PROTEIN_MERIT : 0)
                 ;
+    }
+
+    // See examples in Merit.class
+    private double linearlyScaledPercent(double count, double threshold, double min, double max) {
+        return (Math.max(0, threshold - count) / threshold) * (max - min) + min;
     }
 
     private MeritResult getHarvesterExpandMeritResult(BuildEntityTuple tuple) {
         // Give merit based on how many harvesters we currently have of that type. With zero, give HARVESTER_MERIT[0], etc.
-        List<Double> HARVESTER_MERIT_LIST = Arrays.asList(8.0, 5.0);
-        double DEFAULT_HARVESTER_MERIT = 4.0;
-        double PROTEIN_THRESHOLD = 20;
+        List<Double> HARVESTER_MERIT_LIST = Merit.NEW_HARVESTER_MERIT_BY_ENTITY_COUNT;
         EntityType protein = tuple.target().getType();
         int harvesterCount = myHarvesterCountMap.get(protein);
-        double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : DEFAULT_HARVESTER_MERIT;
-        // Gives a number between .5 and 1.5
-        double proteinMultiplier = 1.5 - Math.min(getProteinCount(protein), PROTEIN_THRESHOLD) / PROTEIN_THRESHOLD;
-        double buildMerit = harvesterMerit * proteinMultiplier;
-        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, tuple.target().getType(), tuple.buildableTile()));
+        double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.HARVESTER_MERIT_DEFAULT;
+        int proteinCount = getProteinCount(protein);
+        double proteinMerit = linearlyScaledPercent(proteinCount, Merit.NEW_HARVESTER_PROTEIN_THRESHOLD, Merit.NEW_HARVESTER_MIN_PROTEIN_MERIT, Merit.NEW_HARVESTER_MAX_PROTEIN_MERIT);
+        double buildMerit = harvesterMerit + proteinMerit;
+//        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, tuple.target().getType(), tuple.buildableTile()));
+//        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
+//        debug(String.format("\t %.2f from lack of protein", proteinMerit));
         return new MeritResult(tuple.mine(), tuple.buildableTile().directionTo(tuple.target()), tuple.buildableTile(), buildMerit);
     }
 
     private double getRootMeritFromNearbyTile(Entity source, Entity closeByEntity) {
-        double ZERO_FROM_PROTEIN = .5;
-        double ONE_FROM_PROTEIN = .25;
-        double TWO_FROM_PROTEIN = 1;
-        double THREE_FROM_PROTEIN = .5;
-        double FRIENDLY_WITHIN_THREE = -3;
-
         int distance = pathing.distance(source, closeByEntity);
+        List<Double> meritByDistance = Merit.NEW_ROOT_MERIT_FROM_PROTEIN_BY_DISTANCE;
         double meritImpact = 0;
-        if (closeByEntity.getType().isProtein()) {
-            meritImpact += switch (distance) {
-                case 0 -> ZERO_FROM_PROTEIN;
-                case 1 -> ONE_FROM_PROTEIN;
-                case 2 -> TWO_FROM_PROTEIN;
-                case 3 -> THREE_FROM_PROTEIN;
-                default -> 0;
-            };
+        if (closeByEntity.getType().isProtein() && distance < meritByDistance.size()) {
+            meritImpact += meritByDistance.get(distance);
         } else if (closeByEntity.mine()) {
-            meritImpact += FRIENDLY_WITHIN_THREE;
+            meritImpact += Merit.NEW_ROOT_MERIT_FROM_FRIENDLY_WITHIN_THREE_DISTANCE;
         }
         return meritImpact;
     }
 
     private boolean shouldConsiderNewRoot(boolean buildingSporer) {
-        // Allow 1 more resource for sporer compared to root, otherwise we look dumb creating a sporer and not folling up with a root
+        // Allow 1 more resource for sporer compared to root, otherwise we look dumb creating a sporer and not following up with a root
         int MIN_EXPAND_PROTEIN = 3 - (buildingSporer ? 0 : 1);
         return Stream.of(myA, myB, myC, myD).allMatch(integer -> integer >= MIN_EXPAND_PROTEIN);
-    }
-
-    private boolean shouldExpand(double merit) {
-        return merit >= 4;
-    }
-
-    private Comparator<Entity> distanceToComparator(Entity entity) {
-        return Comparator.comparing(entity1 -> Math.abs(entity.getX() - entity1.getX()) + Math.abs(entity.getY() - entity1.getY()));
     }
 
     private List<Behavior> silverLeagueBehaviors() {
@@ -1117,7 +1137,7 @@ class Player {
     }
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
-            DebugCategory.GENERAL, true,
+            DebugCategory.GENERAL, false,
             DebugCategory.TIMER, false
     );
 
