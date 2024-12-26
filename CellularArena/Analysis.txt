@@ -32,6 +32,7 @@ Large sparse map, running out
     4881395176070566000
 Large plentiful map
     2855407559329172500
+    -1336280831540291300
 
 
 --12/22/24 Rank 112 Bronze analysis and improvement ideas--

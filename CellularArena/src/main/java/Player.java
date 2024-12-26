@@ -746,6 +746,11 @@ class Player {
     }
 
     private EntityType getArbitraryBuildableType() {
+        int tentacleBuildCount = buildCount(EntityType.TENTACLE);
+        if(tentacleBuildCount > 20) {
+            // If we can build a ton of tentacles, just build it. It's the only one that may incidentally help down the road
+            return EntityType.TENTACLE;
+        }
         Stream<EntityType> ENTITY_BUILD_TYPES = Stream.of(EntityType.BASIC, EntityType.SPORER, EntityType.TENTACLE, EntityType.HARVESTER);
         return ENTITY_BUILD_TYPES.max(Comparator.comparingInt(this::buildCount))
                 .filter(this::canBuild)
