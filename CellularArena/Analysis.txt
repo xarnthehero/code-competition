@@ -35,6 +35,13 @@ Large plentiful map
     -1336280831540291300
 
 
+Current Top Things To Work On:
+    Cache entities and buildable neighbors
+    Harvester placement - try all possible spots, demerits for smashing current harvester
+    Attacking - Make sure killing a high value enemy wins when attacking (seed 366941678159574140 vs #4 Indrill turn 35)
+
+
+
 --12/22/24 Rank 112 Bronze analysis and improvement ideas--
 Movement
 	Random placement should now look at how can we move towards the next protein

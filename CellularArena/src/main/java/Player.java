@@ -19,7 +19,6 @@ class Player {
     private final List<Entity> myRoots = new ArrayList<>();
     private final Map<Entity, Double> buildRootMeritMap = new HashMap<>();
     private final Map<Entity, Double> expandMeritMap = new HashMap<>();
-    private final List<Tuple2<Entity, Entity>> entitiesChangedFromLastTurn = new ArrayList<>();
     private Map<EntityType, Integer> myHarvesterCountMap = new HashMap<>();                  // The number of harvesters per protein type I have
     private Map<EntityType, Integer> enemyHarvesterCountMap = new HashMap<>();               // The number of harvesters per protein type my enemy has
     private int myA;
@@ -88,7 +87,7 @@ class Player {
             if (x >= 0 && x < width && y >= 0 && y < height) {
                 return entities.get(y).get(x);
             }
-            return null;
+            throw new IllegalArgumentException(String.format("(%s,%s) is out of bounds", x, y));
         }
 
         public Stream<Entity> adjacentToMine(int rootId) {
@@ -103,6 +102,7 @@ class Player {
             if (entity.getType().isProtein() && !type.isProtein()) {
                 proteins.remove(entity);
             }
+            entity.createGhostlyRealState();
             entity.setType(type);
             entity.setOwner(Owner.ME);
             entity.setDirection(direction);
@@ -268,10 +268,15 @@ class Player {
         private final Grid grid;
         private Entity up, down, left, right;
         private EntityType type;
-        private EntityType oldType;
         private final List<Entity> children;
         private List<Entity> neighbors;
         private int owner;           // 1 for me, 2 for enemy, 0 for no one
+        // On turn rollover, copy information needed here
+        private EntityCopy lastTurnState;
+        // When an organism decides to build something, we update the Entity's information on the same turn so other organisms
+        // can act accordingly (two organisms don't build on the same empty space, etc). This lets the entity reflect its
+        // future state. Store the current 'real' state here for reconciliation purposes next turn.
+        private EntityCopy ghostlyRealState;
         private Direction direction;
 
         public Entity(Grid grid, int x, int y) {
@@ -282,19 +287,16 @@ class Player {
             reset();
         }
 
-        public Entity(Entity copy) {
-            this.grid = copy.grid;
-            this.x = copy.x;
-            this.y = copy.y;
-            this.type = copy.type;
-            this.children = new ArrayList<>(copy.children);
-        }
-
         public void reset() {
-            oldType = type;
+            if(ghostlyRealState != null) {
+                lastTurnState = ghostlyRealState;
+                ghostlyRealState = null;
+            } else {
+                lastTurnState = new EntityCopy(type, direction, owner);
+            }
             type = EntityType.EMPTY;
             children.clear();
-            owner = -1;
+            owner = Owner.NOBODY;
         }
 
         public int getId() {
@@ -327,10 +329,6 @@ class Player {
 
         public void setType(EntityType type) {
             this.type = type;
-        }
-
-        public EntityType getOldType() {
-            return oldType;
         }
 
         public List<Entity> getChildren() {
@@ -391,6 +389,18 @@ class Player {
 
         public void setDirection(Player.Direction direction) {
             this.direction = direction;
+        }
+
+        public EntityCopy getLastTurnState() {
+            return lastTurnState;
+        }
+
+        public void createGhostlyRealState() {
+            ghostlyRealState = new EntityCopy(type, direction, owner);
+        }
+
+        public EntityCopy getGhostlyRealState() {
+            return ghostlyRealState;
         }
 
         public boolean mine() {
@@ -483,6 +493,9 @@ class Player {
         public String toString() {
             return String.format("[Entity %s,%s  %s]", x, y, type);
         }
+
+        // When we build a "ghost" entity to replace the current state of an entity for processing this turn, record the current "real" state for use in next turn's reconciliation.
+        private record EntityCopy(EntityType type, Direction direction, int owner) {}
     }
 
     private interface Behavior {
@@ -774,9 +787,6 @@ class Player {
     }
 
     public record Tuple2<A, B>(A a, B b) {
-    }
-
-    public record Tuple3<A, B, C>(A a, B b, C c) {
     }
 
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
@@ -1095,7 +1105,6 @@ class Player {
         grid.getProteins().clear();
         buildRootMeritMap.clear();
         expandMeritMap.clear();
-        entitiesChangedFromLastTurn.clear();
         myHarvesterCountMap.clear();
         enemyHarvesterCountMap.clear();
     }
@@ -1107,18 +1116,15 @@ class Player {
 
         myRoots.sort(Comparator.comparingInt(Entity::getId));
 
-        // Process changed entities - this will miss entities that were destroyed for now. I don't think they are needed yet.
-        // A() is the old value, B() the new
-        // Reprocess pathing for all changes in walls and their neighbors within n tiles
-        // If we start hitting processing timeouts, we can modify this behavior to reprocess fewer tiles or set a limit on search distance
-        int DISTANCE_TO_TO_REPROCESS = 3;
-        entitiesChangedFromLastTurn.stream()
-                .filter(tuple -> tuple.b().getType().equals(EntityType.WALL))
-                .map(Tuple2::b)
-                .flatMap(entity -> pathing.entitiesWithinDistance(entity, DISTANCE_TO_TO_REPROCESS).stream())
-                .distinct()
-//                .peek(entity -> debug("Reprocessing pathing for " + entity))
-                .forEach(entity -> pathing.generatePaths(entity));
+        if(turn > 1) {
+            // Process changed entities
+            // Reprocess pathing for all changes in walls and their neighbors
+            // If we start hitting processing timeouts, we can modify this behavior to reprocess fewer tiles or set a limit on search distance
+            grid.getEntitySet().stream()
+                    .filter(entity -> !entity.getType().equals(entity.getLastTurnState().type()))
+                    .peek(entity -> debug("Entity changed between turns: " + entity))
+                    .forEach(entity -> pathing.generatePaths(entity));
+        }
 
         myHarvesterCountMap = grid.myEntitiesStream()
                 .filter(entity -> entity.getType().equals(EntityType.HARVESTER))
@@ -1165,11 +1171,6 @@ class Player {
                 String type = in.next(); // WALL, ROOT, BASIC, TENTACLE, HARVESTER, SPORER, A, B, C, D
                 EntityType entityType = EntityType.valueOf(type);
                 Entity entity = grid.entityAt(x, y);
-                if (turn > 1 && !entityType.equals(entity.getOldType())) {
-                    // Entity changed type between this turn and last, record a copy of change for later processing
-                    // The first entry is a copy (the old value), second is the current value
-                    entitiesChangedFromLastTurn.add(new Tuple2<>(new Entity(entity), entity));
-                }
                 entity.setType(entityType);
                 if (entityType.isProtein()) {
                     grid.getProteins().add(entity);
