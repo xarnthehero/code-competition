@@ -102,7 +102,7 @@ class Player {
                     // Return arbitrary neighbor owned by rootId as build from.
                     // If it starts to matter who builds this entity, we can break this out to multiple stream entries.
                     .map(direction -> new BuildOption(entity.myNeighbor(rootId), direction, entity, null));
-            return rootToBuildableAdjacentTilesMap.get(rootId).stream()
+            return buildableTilesByRootIdStream(rootId)
                     .filter(neighborPredicate)
                     .flatMap(entityToBuildOptionMapper);
         }
@@ -115,6 +115,7 @@ class Player {
             entity.setType(type);
             entity.setOwner(Owner.ME);
             entity.setDirection(direction);
+            entity.refreshCachedValues();
         }
     }
 
@@ -325,6 +326,13 @@ class Player {
             descendantCount = null;
             harvestedByMe = null;
             harvestedByOpponent = null;
+        }
+
+
+        public void refreshCachedValues() {
+            // After doing a ghost build, refresh calculated values that I may use during on turn
+            buildable = null;
+            harvestedByMe = null;
         }
 
         public int getId() {
@@ -585,7 +593,7 @@ class Player {
                     })
                     .map(direction -> new BuildOption(entity.myNeighbor(rootId), direction, entity, null));
 
-            BuildOption attackResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
+            BuildOption attackResult = buildableTilesByRootIdStream(rootId)
                     .filter(entity -> pathing.entitiesWithinDistance(entity, 3).stream().anyMatch(Entity::enemy))
                     .flatMap(entityToDirectionTupleMapper)
                     .map(result -> new BuildOption(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
@@ -676,10 +684,8 @@ class Player {
     private class ExpandToSpaceBehavior implements Player.Behavior {
         @Override
         public Command getCommand(int rootId) {
-            // Get adjacent buildable spaces
-            // Get merit ranking for building there
-            // Sort by ranking
-            BuildOption bestExpandResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
+            // Get adjacent buildable spaces, get merit ranking for building there, sort by ranking
+            BuildOption bestExpandResult = buildableTilesByRootIdStream(rootId)
                     .map(entity -> new BuildOption(entity.myNeighbor(rootId), null, entity, calculateExpandMerit(entity)))
 //                    .peek(result -> debug(String.format("%.2f merit expanding to %s", result.merit(), result.to())))
                     .max(Comparator.comparingDouble(BuildOption::merit))
@@ -847,6 +853,12 @@ class Player {
                 .orElse(null);
     }
 
+    private Stream<Entity> buildableTilesByRootIdStream(int rootId) {
+        // Filter by isBuildable as it may have changed since the beginning of the turn
+        return rootToBuildableAdjacentTilesMap.get(rootId).stream()
+                .filter(Entity::isBuildable);
+    }
+
     private record BuildOption(Entity from, Direction direction, Entity to, Double merit) {
     }
 
@@ -903,7 +915,7 @@ class Player {
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
                     .map(entity -> new BuildOption(entity, entity.getDirection(), null, null));
         } else {
-            sporeDirectionStream = rootToBuildableAdjacentTilesMap.get(rootId).stream()
+            sporeDirectionStream = buildableTilesByRootIdStream(rootId)
                     .flatMap(entityToDirectionTupleMapper);
         }
 
@@ -1203,7 +1215,6 @@ class Player {
             // If we start hitting processing timeouts, we can modify this behavior to reprocess fewer tiles or set a limit on search distance
             grid.getEntitySet().stream()
                     .filter(entity -> !entity.getType().equals(entity.getLastTurnState().type()))
-                    .peek(entity -> debug("Entity changed between turns: " + entity))
                     .forEach(entity -> pathing.generatePaths(entity));
         }
 
