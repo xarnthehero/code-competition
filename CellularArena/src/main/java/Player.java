@@ -493,15 +493,30 @@ class Player {
     private class AttackBehavior implements Behavior {
         @Override
         public Command getCommand(int rootId) {
-            if (!canBuild(EntityType.TENTACLE)) {
+            Player.EntityType buildType = EntityType.TENTACLE;
+            if (!canBuild(buildType)) {
+                debug("Can't build a sporer, skipping " + this);
                 return null;
             }
-            List<BuildEntityTuple> possibleAttacks = getPossibleBuildsWithTarget(rootId, Entity::enemy);
-            if (possibleAttacks.isEmpty()) {
+            Function<Entity, Stream<MeritResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values())
+                    .filter(direction -> {
+                        Entity neighbor = entity.entityInDirection(direction);
+                        return neighbor != null && !neighbor.mine() && !neighbor.getType().equals(EntityType.WALL);
+                    })
+                    .map(direction -> new MeritResult(entity.myNeighbor(rootId), direction, entity, null));
+
+            MeritResult attackResult = grid.adjacentToMine(rootId)
+                    .filter(Entity::isBuildable)
+                    .filter(entity -> pathing.entitiesWithinDistance(entity, 3).stream().anyMatch(Entity::enemy))
+                    .flatMap(entityToDirectionTupleMapper)
+                    .map(result -> new MeritResult(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
+//                    .peek(result -> debug(String.format("%.2f merit attacking at %s %s", result.merit(), result.to(), result.direction())))
+                    .max(Comparator.comparingDouble(MeritResult::merit))
+                    .orElse(null);
+            if (attackResult == null) {
                 return null;
             }
-            BuildEntityTuple ggNoob = possibleAttacks.stream().max(Comparator.comparingInt(buildEntityTuple -> buildEntityTuple.target().descendentCount())).get();
-            return new GrowCommand(rootId, ggNoob.mine(), ggNoob.buildableTile(), EntityType.TENTACLE, ggNoob.buildableTile().directionTo(ggNoob.target()), 8);
+            return new GrowCommand(rootId, attackResult.from(), attackResult.to(), buildType, attackResult.direction(), attackResult.merit());
         }
 
         public String toString() {
@@ -565,11 +580,6 @@ class Player {
             if (possibleHarvesterBuilds.isEmpty()) {
                 return null;
             }
-            // Prioritize not building on something we are harvesting, then what is low on protein count.
-//            Comparator<BuildEntityTuple> notHarvestingComparator = Comparator.comparingInt(value -> EntityPredicates.HARVESTED_BY_ME.test(value.buildableTile()) ? 1 : 0);
-//            BuildEntityTuple harvesterToBuild = possibleHarvesterBuilds.stream().min(
-//                    notHarvestingComparator.thenComparingLong(value -> myHarvesterCountMap.get(value.target().getType()))
-//            ).get();
             MeritResult harvesterToBuild = possibleHarvesterBuilds.stream()
                     .map(Player.this::getHarvesterExpandMeritResult)
                     .max(Comparator.comparingDouble(MeritResult::merit))
@@ -591,7 +601,7 @@ class Player {
             MeritResult bestExpandResult = grid.adjacentToMine(rootId)
                     .filter(Entity::isBuildable)
                     .map(entity -> new MeritResult(entity.myNeighbor(rootId), null, entity, calculateExpandMerit(entity)))
-                    .peek(result -> debug(String.format("%.2f merit expanding to %s", result.merit(), result.to())))
+//                    .peek(result -> debug(String.format("%.2f merit expanding to %s", result.merit(), result.to())))
                     .max(Comparator.comparingDouble(MeritResult::merit))
                     .orElse(null);
             Player.EntityType buildType = getArbitraryBuildableType();
@@ -747,7 +757,7 @@ class Player {
 
     private EntityType getArbitraryBuildableType() {
         int tentacleBuildCount = buildCount(EntityType.TENTACLE);
-        if(tentacleBuildCount > 20) {
+        if (tentacleBuildCount > 20) {
             // If we can build a ton of tentacles, just build it. It's the only one that may incidentally help down the road
             return EntityType.TENTACLE;
         }
@@ -872,11 +882,13 @@ class Player {
         // Same as above, first harvester of this protein type gets [0], etc
         public static final List<Double> NEW_HARVESTER_MERIT_BY_ENTITY_COUNT = Arrays.asList(8.0, 5.0);
         // Default merit count of harvesters of a protein type after the 2nd
-        public static final double HARVESTER_MERIT_DEFAULT = 4.0;
+        public static final double NEW_HARVESTER_DEFAULT_MERIT = 4.0;
+        // Don't harvest near enemies
+        public static final double NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY = -5;
         // Depending on how badly we need a protein, give a multiplier between the blow values ( _MIN_ to _MAX_, linearly scaling from 0 to the below value)
         // For example, given the below 3 values of 20, 2, .5, if we have 6 of that protein, give a (20-6)/20 * (2-.5) + .5 = 1.55 multiplier because we are relatively low
         // Having 20 would give the min of (20-20)/20 * (2-.5) + .5 = .5
-        public static final double NEW_HARVESTER_PROTEIN_THRESHOLD = 20;
+        public static final double NEW_HARVESTER_PROTEIN_THRESHOLD = 8;
         public static final double NEW_HARVESTER_MAX_PROTEIN_MERIT = 5;
         public static final double NEW_HARVESTER_MIN_PROTEIN_MERIT = 0;
 
@@ -892,6 +904,19 @@ class Player {
         public static final double NEW_EXPANSION_LATE_GAME_EXPAND_MERIT = 5;
         // Merit bonus when I'm out of a protein and can consume one
         public static final double NEW_EXPANSION_NEED_PROTEIN_MERIT = 3;
+
+        // -- New Attacker --
+        // Merit for pointing in the direction of an enemy 1, 2, 3 spaces away. 1 space is covered below by killing, building 1 space away pointing the wrong way doesn't help.
+        public static final List<Double> NEW_ATTACKER_DISTANCE_FROM_ENEMY_MERIT = Arrays.asList(0.0, 10., 10.);
+        // Get a kill - build distance 1 away and pointing in the right direction
+        public static final double NEW_ATTACKER_PARENT_KILL_MERIT = 6;
+        // Merit for each child of the parent killed. Not sure yet if this is an important distinction, or if a kill is a kill
+        public static final double NEW_ATTACKER_CHILD_KILL_MERIT = 1;
+        // If a protein is contested, better we take it than the opponent
+        public static final double NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT = 3;
+        // If we are already pointing an attacker at the tile we are considering building in, it isn't as important to build there because the enemy can't
+        // It still may be important if the enemy could build up a tentacle coming into this square and us building one would prevent that (both new tentacles die)
+        public static final double NEW_ATTACKER_TILE_CONTROL_MERIT = -2;
     }
 
     /**
@@ -958,10 +983,13 @@ class Player {
         List<Double> HARVESTER_MERIT_LIST = Merit.NEW_HARVESTER_MERIT_BY_ENTITY_COUNT;
         EntityType protein = tuple.target().getType();
         int harvesterCount = myHarvesterCountMap.get(protein);
-        double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.HARVESTER_MERIT_DEFAULT;
+        double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.NEW_HARVESTER_DEFAULT_MERIT;
         int proteinCount = getProteinCount(protein);
         double proteinMerit = linearlyScaledPercent(proteinCount, Merit.NEW_HARVESTER_PROTEIN_THRESHOLD, Merit.NEW_HARVESTER_MIN_PROTEIN_MERIT, Merit.NEW_HARVESTER_MAX_PROTEIN_MERIT);
-        double buildMerit = harvesterMerit + proteinMerit;
+        double closeEnemyMerit = pathing.entitiesWithinDistance(tuple.target(), 2).stream()
+                .filter(Entity::enemy)
+                .count() * Merit.NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY;
+        double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit;
 //        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, tuple.target().getType(), tuple.buildableTile()));
 //        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
 //        debug(String.format("\t %.2f from lack of protein", proteinMerit));
@@ -984,6 +1012,55 @@ class Player {
         // Allow 1 more resource for sporer compared to root, otherwise we look dumb creating a sporer and not following up with a root
         int MIN_EXPAND_PROTEIN = 3 - (buildingSporer ? 0 : 1);
         return Stream.of(myA, myB, myC, myD).allMatch(integer -> integer >= MIN_EXPAND_PROTEIN);
+    }
+
+    private double calculateAttackMerit(Entity newTentacle, Direction buildDirection) {
+        // Points for pointing at nearby enemies where the next direction is our attack direction
+        // Points for enemies that are 1 or 2 spaces away?
+        return pathing.entitiesWithinDistance(newTentacle, 3).stream()
+                .filter(Entity::enemy)
+                .mapToDouble(protein -> getNearbyEnemyAttackMerit(newTentacle, buildDirection, protein))
+                .sum() + getLocationAttackMerit(newTentacle);
+    }
+
+    private double getNearbyEnemyAttackMerit(Entity newTentacle, Direction buildDirection, Entity enemy) {
+        PathInfo pathInfo = pathing.pathInfo(newTentacle, enemy);
+        if (pathInfo == null) {
+            return 0;
+        }
+        List<Double> enemyDistanceMerits = Merit.NEW_ATTACKER_DISTANCE_FROM_ENEMY_MERIT;
+        int distance = pathInfo.distance();
+
+        Entity nextEntity = newTentacle.entityInDirection(buildDirection);
+        if (nextEntity == null) {
+            return 0;
+        }
+
+        boolean goingInRightDirection;
+        boolean kill = false;
+        if(nextEntity == enemy) {
+            goingInRightDirection = true;
+            kill = true;
+        } else {
+            PathInfo nextPathInfo = pathing.pathInfo(nextEntity, enemy);
+            if (nextPathInfo == null) {
+                return 0;
+            }
+            goingInRightDirection = nextPathInfo.distance() < pathInfo.distance();
+        }
+
+        double closeToEnemyMerit = goingInRightDirection ? enemyDistanceMerits.get(distance - 1) : 0;
+        double killParentMerit = kill ? Merit.NEW_ATTACKER_PARENT_KILL_MERIT : 0;
+        double killChildMerit = kill ? enemy.getChildren().size() * Merit.NEW_ATTACKER_CHILD_KILL_MERIT : 0;
+        debug(String.format("Attack merits for %s %s   %.2f  %.2f  %.2f attacking %s", newTentacle, buildDirection, closeToEnemyMerit, killParentMerit, killChildMerit, enemy));
+        return closeToEnemyMerit + killParentMerit + killChildMerit;
+    }
+
+    private double getLocationAttackMerit(Entity newTentacle) {
+        Entity myNeighborAttackingNewTentacle = newTentacle.myNeighbor(entity -> entity.getType().equals(EntityType.TENTACLE) && entity.entityInFront() == newTentacle);
+        return (newTentacle.getType().isProtein() ? Merit.NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT : 0)
+                + (myNeighborAttackingNewTentacle != null ? Merit.NEW_ATTACKER_TILE_CONTROL_MERIT : 0)
+                ;
     }
 
     private List<Behavior> silverLeagueBehaviors() {

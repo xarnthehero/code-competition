@@ -25,7 +25,7 @@ Need to track:
 Interesting game seeds:
 Resources far away, 2 root jumps needed
     -3194626388501203500
-Closed map, may resources, race for middle - good for space denial win
+Closed map, many resources, race for middle - good for space denial win
     -562798768321121100
     6812241268562684000
 Large sparse map, running out
@@ -96,16 +96,20 @@ Notes about current state:
 
 Action Plan:
 Behavior Scores
-    I can move each behavior to giving a score, similar to the new spore / root attractiveness score. This way I can have an organism
+[Done]    I can move each behavior to giving a score, similar to the new spore / root attractiveness score. This way I can have an organism
     try a couple behaviors and pick the highest scoring. This will help in situations where I COULD create a harvester in the beginning
     of the game, but really it is important to build towards the middle for map control, etc. The build algorithm would recognise the
     importance of expansion and give a high score, while the harvester attractiveness score would be more standard.
 Movement
-    Need to have a prioritization plan similar to new root expansion.
-    If there are very few of a protein on the map, give importance there
+[Done]    Need to have a prioritization plan similar to new root expansion.
+[Done]    If there are very few of a protein on the map, give importance there
     In general, prioritize moving towards the enemies part of the map unless they can fight and we can't
     Need a couple of D harvesters (1-2?), many Bs and Cs for fighting.
     Cs double up on harvesters and tentacles, both important. Bs are needed for sporers, not as important, especially as the game moves on.
+    Place arbitrary entities in a meaningful direction
+Harvesters
+    When can be placed in multiple spots, prioritize not blocking other proteins and going in a direction we want to go in
+    Can create sprorer first turn and harvest next turn due to expansion, need expand logic to incorporate future harvesters
 Attacking
     If I can't fight, don't expand towards the enemy. People's algorithms will typically fight when I come close.
     Start fighting two spaces away.
@@ -115,13 +119,17 @@ Map Control
 
 
 
-
-
-
-
-
-
-
+--12/27/24 Rank 123 Gold analysis and improvement ideas--
+Many of the previous observations are still relevant and need improvements.
+Sporer
+    Need to consider resources that I am currently 1 and 2 spaces away from when expanding. I had a game where I am close to many D proteins and expanded to more D proteins, had no Cs.
+    I had this note above, but prioritization of different proteins based on the state of the game, don't treat all equally. I only need Ds if my harvester count is not where it should be. Cs are the most important.
+    Reduce merit growing a sporer shooting somewhere we can already shoot to
+    I'm spawning a spawner when I already have a similar spawner and don't have the protein income to support it
+Attacking
+    Being closer in descendant count to the root may be important - it means defending the root instead of attacking far out
+Expanding
+    Be careful about expanding for no reason early game and blocking spots that you will need for harvesting when protein count is low
 
 
 
