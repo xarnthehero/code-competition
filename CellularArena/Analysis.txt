@@ -78,9 +78,6 @@ Pathfinding Algorithm
 
 
 
-
-
-
 --12/24/24 Rank 177 Silver analysis and improvement ideas--
 Accomplished most of the previous list.
 Notes about current state:
@@ -112,7 +109,7 @@ Harvesters
     Can create sprorer first turn and harvest next turn due to expansion, need expand logic to incorporate future harvesters
 Attacking
     If I can't fight, don't expand towards the enemy. People's algorithms will typically fight when I come close.
-    Start fighting two spaces away.
+[done]    Start fighting two spaces away.
 Map Control
     On closed maps, take over the 2-3 points needed to win the game as early as possible
     Need code to calculate a couple jumps ahead, what resources are required to get to those choke points
@@ -121,6 +118,12 @@ Map Control
 
 --12/27/24 Rank 123 Gold analysis and improvement ideas--
 Many of the previous observations are still relevant and need improvements.
+General
+    There are many things I should be calculating and caching every turn:
+        My entities per root id
+        Buildable neighbors per root id
+        If a tile is harvested by me or an opponent
+        If a tile is attacked by me or an opponent
 Sporer
     Need to consider resources that I am currently 1 and 2 spaces away from when expanding. I had a game where I am close to many D proteins and expanded to more D proteins, had no Cs.
     I had this note above, but prioritization of different proteins based on the state of the game, don't treat all equally. I only need Ds if my harvester count is not where it should be. Cs are the most important.
@@ -130,7 +133,11 @@ Attacking
     Being closer in descendant count to the root may be important - it means defending the root instead of attacking far out
 Expanding
     Be careful about expanding for no reason early game and blocking spots that you will need for harvesting when protein count is low
-
+Turn timeout
+    Understanding when the 50ms turn timeout begins and ends
+        Does the turn start after I give my last turn's commands, or right before or after I get the next turn's input?
+        Is it a hard 50ms or do they give a grace period? I suspect they do.
+    If I can get a good grip on how much time I have left in a turn, I can run calculations like expand pathfinding that is not complete
 
 
 

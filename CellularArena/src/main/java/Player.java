@@ -908,6 +908,8 @@ class Player {
         // -- New Attacker --
         // Merit for pointing in the direction of an enemy 1, 2, 3 spaces away. 1 space is covered below by killing, building 1 space away pointing the wrong way doesn't help.
         public static final List<Double> NEW_ATTACKER_DISTANCE_FROM_ENEMY_MERIT = Arrays.asList(0.0, 10., 10.);
+        // Get a small merit bonus to break ties between two directions we could be pointing. Ex if building down and enemies are to the south east, point east.
+        public static final double NEW_ATTACKER_POINTED_AT_ENEMY = .2;
         // Get a kill - build distance 1 away and pointing in the right direction
         public static final double NEW_ATTACKER_PARENT_KILL_MERIT = 6;
         // Merit for each child of the parent killed. Not sure yet if this is an important distinction, or if a kill is a kill
@@ -1049,11 +1051,19 @@ class Player {
             goingInRightDirection = nextPathInfo.distance() < pathInfo.distance();
         }
 
+        int distanceInDirection = switch(buildDirection) {
+            case N -> Math.max(0, newTentacle.getY() - enemy.getY());
+            case S -> Math.max(0, enemy.getY() - newTentacle.getY());
+            case W -> Math.max(0, newTentacle.getX() - enemy.getX());
+            case E -> Math.max(0, enemy.getX() - newTentacle.getX());
+        };
+
         double closeToEnemyMerit = goingInRightDirection ? enemyDistanceMerits.get(distance - 1) : 0;
         double killParentMerit = kill ? Merit.NEW_ATTACKER_PARENT_KILL_MERIT : 0;
         double killChildMerit = kill ? enemy.getChildren().size() * Merit.NEW_ATTACKER_CHILD_KILL_MERIT : 0;
-        debug(String.format("Attack merits for %s %s   %.2f  %.2f  %.2f attacking %s", newTentacle, buildDirection, closeToEnemyMerit, killParentMerit, killChildMerit, enemy));
-        return closeToEnemyMerit + killParentMerit + killChildMerit;
+        double distanceMerit = Merit.NEW_ATTACKER_POINTED_AT_ENEMY * distanceInDirection;
+//        debug(String.format("Attack merits for %s %s   %.2f  %.2f  %.2f  %.2f  attacking %s", newTentacle, buildDirection, closeToEnemyMerit, killParentMerit, killChildMerit, distanceMerit, enemy));
+        return closeToEnemyMerit + killParentMerit + killChildMerit + distanceMerit;
     }
 
     private double getLocationAttackMerit(Entity newTentacle) {
@@ -1214,7 +1224,7 @@ class Player {
     }
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
-            DebugCategory.GENERAL, false,
+            DebugCategory.GENERAL, true,
             DebugCategory.TIMER, false
     );
 
