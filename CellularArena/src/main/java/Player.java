@@ -92,12 +92,19 @@ class Player {
             throw new IllegalArgumentException(String.format("(%s,%s) is out of bounds", x, y));
         }
 
-        public Stream<Entity> adjacentToMine(int rootId) {
-            return myEntitiesStream()
-                    .filter(entity -> entity.getRootId() == rootId)
-                    .flatMap(Entity::neighborsStream)
-                    .distinct()
-                    .filter(entity -> !entity.mine());
+        public Stream<BuildOption> getBuildOptionStream(int rootId, Predicate<Entity> neighborPredicate) {
+            Function<Entity, Stream<BuildOption>> entityToBuildOptionMapper = entity -> Arrays.stream(Direction.values())
+                    .filter(direction -> {
+                        Entity entityInFront = entity.entityInDirection(direction);
+                        // Don't look silly pointing at a wall
+                        return entityInFront != null && !entityInFront.getType().equals(EntityType.WALL);
+                    })
+                    // Return arbitrary neighbor owned by rootId as build from.
+                    // If it starts to matter who builds this entity, we can break this out to multiple stream entries.
+                    .map(direction -> new BuildOption(entity.myNeighbor(rootId), direction, entity, null));
+            return rootToBuildableAdjacentTilesMap.get(rootId).stream()
+                    .filter(neighborPredicate)
+                    .flatMap(entityToBuildOptionMapper);
         }
 
         public void buildGhostEntity(Entity entity, EntityType type, Direction direction) {
@@ -571,19 +578,19 @@ class Player {
                 debug("Can't build a sporer, skipping " + this);
                 return null;
             }
-            Function<Entity, Stream<MeritResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values())
+            Function<Entity, Stream<BuildOption>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values())
                     .filter(direction -> {
                         Entity neighbor = entity.entityInDirection(direction);
                         return neighbor != null && !neighbor.mine() && !neighbor.getType().equals(EntityType.WALL);
                     })
-                    .map(direction -> new MeritResult(entity.myNeighbor(rootId), direction, entity, null));
+                    .map(direction -> new BuildOption(entity.myNeighbor(rootId), direction, entity, null));
 
-            MeritResult attackResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
+            BuildOption attackResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
                     .filter(entity -> pathing.entitiesWithinDistance(entity, 3).stream().anyMatch(Entity::enemy))
                     .flatMap(entityToDirectionTupleMapper)
-                    .map(result -> new MeritResult(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
+                    .map(result -> new BuildOption(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
 //                    .peek(result -> debug(String.format("%.2f merit attacking at %s %s", result.merit(), result.to(), result.direction())))
-                    .max(Comparator.comparingDouble(MeritResult::merit))
+                    .max(Comparator.comparingDouble(BuildOption::merit))
                     .orElse(null);
             if (attackResult == null) {
                 return null;
@@ -606,7 +613,7 @@ class Player {
             if (!shouldConsiderNewRoot(true)) {
                 return null;
             }
-            MeritResult mostMerit = getRootExpandLocation(rootId, false);
+            BuildOption mostMerit = getRootExpandLocation(rootId, false);
 
 //            debug(String.format("%s Most Merit: %s", this, mostMerit));
             if (mostMerit != null) {
@@ -628,7 +635,7 @@ class Player {
         @Override
         public Player.Command getCommand(int rootId) {
             if (shouldConsiderNewRoot(false)) {
-                MeritResult nextRoot = getRootExpandLocation(rootId, true);
+                BuildOption nextRoot = getRootExpandLocation(rootId, true);
                 if (nextRoot != null) {
                     return new Player.SporeCommand(rootId, nextRoot.from(), nextRoot.to(), nextRoot.merit());
                 }
@@ -647,15 +654,17 @@ class Player {
             if (!canBuild(Player.EntityType.HARVESTER)) {
                 return null;
             }
-            Predicate<Entity> harvestablePredicate = entity -> entity.getType().isProtein() && !entity.isHarvestedByMe();
-            List<BuildEntityTuple> possibleHarvesterBuilds = getPossibleBuildsWithTarget(rootId, harvestablePredicate);
-            if (possibleHarvesterBuilds.isEmpty()) {
+            BuildOption harvesterToBuild = grid.getBuildOptionStream(rootId, entity -> true)
+                    .filter(buildOption -> {
+                        Entity pointedAt = buildOption.to().entityInDirection(buildOption.direction());
+                        return pointedAt.getType().isProtein() && !pointedAt.isHarvestedByMe();
+                    }).map(buildOption -> new BuildOption(buildOption.from(), buildOption.direction(), buildOption.to(), getHarvesterExpandMeritResult(buildOption)))
+                    .max(Comparator.comparingDouble(BuildOption::merit))
+                    .orElse(null);
+
+            if (harvesterToBuild == null) {
                 return null;
             }
-            MeritResult harvesterToBuild = possibleHarvesterBuilds.stream()
-                    .map(Player.this::getHarvesterExpandMeritResult)
-                    .max(Comparator.comparingDouble(MeritResult::merit))
-                    .orElse(null);
             return new GrowCommand(rootId, harvesterToBuild.from(), harvesterToBuild.to(), EntityType.HARVESTER, harvesterToBuild.direction(), harvesterToBuild.merit());
         }
 
@@ -670,10 +679,10 @@ class Player {
             // Get adjacent buildable spaces
             // Get merit ranking for building there
             // Sort by ranking
-            MeritResult bestExpandResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
-                    .map(entity -> new MeritResult(entity.myNeighbor(rootId), null, entity, calculateExpandMerit(entity)))
+            BuildOption bestExpandResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
+                    .map(entity -> new BuildOption(entity.myNeighbor(rootId), null, entity, calculateExpandMerit(entity)))
 //                    .peek(result -> debug(String.format("%.2f merit expanding to %s", result.merit(), result.to())))
-                    .max(Comparator.comparingDouble(MeritResult::merit))
+                    .max(Comparator.comparingDouble(BuildOption::merit))
                     .orElse(null);
             Player.EntityType buildType = getArbitraryBuildableType();
             if (bestExpandResult == null || buildType == null) {
@@ -838,23 +847,7 @@ class Player {
                 .orElse(null);
     }
 
-    private record BuildEntityTuple(Entity mine, Entity buildableTile, Entity target) {
-    }
-
-    private record MeritResult(Entity from, Direction direction, Entity to, Double merit) {
-    }
-
-    public record Tuple2<A, B>(A a, B b) {
-    }
-
-    private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
-        List<BuildEntityTuple> tuples = new ArrayList<>();
-        for (Entity emptyTile : rootToBuildableAdjacentTilesMap.get(rootId)) {
-            emptyTile.neighborsStream().filter(targetPredicate).forEach(target -> {
-                tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(rootId), emptyTile, target));
-            });
-        }
-        return tuples;
+    private record BuildOption(Entity from, Direction direction, Entity to, Double merit) {
     }
 
     private boolean canBuild(EntityType type) {
@@ -899,30 +892,30 @@ class Player {
      *                         to create a spore, then spawn a root next turn.
      * @return The result of all possibilities for new ROOT expansion
      */
-    private MeritResult getRootExpandLocation(int rootId, boolean useExistingSpore) {
-        Function<Entity, Stream<MeritResult>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new MeritResult(entity, direction, null, null));
+    private BuildOption getRootExpandLocation(int rootId, boolean useExistingSpore) {
+        Function<Entity, Stream<BuildOption>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new BuildOption(entity, direction, null, null));
 
         // Stream with the place we want to place a spore and its direction
-        Stream<MeritResult> sporeDirectionStream;
+        Stream<BuildOption> sporeDirectionStream;
         if (useExistingSpore) {
             sporeDirectionStream = grid.myEntitiesStream()
                     .filter(entity -> entity.getRootId() == rootId)
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
-                    .map(entity -> new MeritResult(entity, entity.getDirection(), null, null));
+                    .map(entity -> new BuildOption(entity, entity.getDirection(), null, null));
         } else {
             sporeDirectionStream = rootToBuildableAdjacentTilesMap.get(rootId).stream()
                     .flatMap(entityToDirectionTupleMapper);
         }
 
         return sporeDirectionStream
-                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new MeritResult(result.from(), result.direction(), potentialRootTile, null)))
+                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new BuildOption(result.from(), result.direction(), potentialRootTile, null)))
                 .filter(result -> result.to().isBuildable())
                 .map(result -> {
                     double totalMerit = calculateRootMerit(result.to()) + getRootMeritWithSource(result.from(), result.to());
-                    return new MeritResult(result.from(), result.direction(), result.to(), totalMerit);
+                    return new BuildOption(result.from(), result.direction(), result.to(), totalMerit);
                 })
 //                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.merit(), result.from(), result.direction(), result.to())))
-                .max(Comparator.comparingDouble(MeritResult::merit))
+                .max(Comparator.comparingDouble(BuildOption::merit))
                 .orElse(null);
     }
 
@@ -947,7 +940,14 @@ class Player {
         // Default merit count of harvesters of a protein type after the 2nd
         public static final double NEW_HARVESTER_DEFAULT_MERIT = 4.0;
         // Don't harvest near enemies
-        public static final double NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY = -5;
+        public static final double NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY_MERIT = -5;
+        // Prioritize building on tiles having a lower number of proteins they can harvest. If tile 1 can harvest an A or D and tile 2 can only harvest that same D,
+        // regardless of going for A or D first, we want to harvest A from tile 1 and D from tile 2. If we are going for D, give a benefit to tile 2 over 1.
+        public static final double NEW_HARVESTER_TILE_HARVESTABLE_PROTEINS_MERIT = -.2;
+        // If we are building the last harvester we can afford, and we don't have at least 1 B and C harvester (including the built one), we are getting locked out
+        // of building future harvesters unless we consume one of those proteins in the future - a bad place to be. Hold off on this harvester in hopes that we
+        // get a B and C.
+        public static final double NEW_HARVESTER_NO_FUTURE_HARVESTERS = -10;
         // Depending on how badly we need a protein, give a multiplier between the blow values ( _MIN_ to _MAX_, linearly scaling from 0 to the below value)
         // For example, given the below 3 values of 20, 2, .5, if we have 6 of that protein, give a (20-6)/20 * (2-.5) + .5 = 1.55 multiplier because we are relatively low
         // Having 20 would give the min of (20-20)/20 * (2-.5) + .5 = .5
@@ -1043,26 +1043,39 @@ class Player {
         return (Math.max(0, threshold - count) / threshold) * (max - min) + min;
     }
 
-    private MeritResult getHarvesterExpandMeritResult(BuildEntityTuple tuple) {
+    private double getHarvesterExpandMeritResult(BuildOption buildOption) {
         // Give merit based on how many harvesters we currently have of that type. With zero, give HARVESTER_MERIT[0], etc.
         List<Double> HARVESTER_MERIT_LIST = Merit.NEW_HARVESTER_MERIT_BY_ENTITY_COUNT;
-        EntityType protein = tuple.target().getType();
+        Entity proteinTarget = buildOption.to().entityInDirection(buildOption.direction());
+        EntityType protein = proteinTarget.getType();
         int harvesterCount = myHarvesterCountMap.get(protein);
         double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.NEW_HARVESTER_DEFAULT_MERIT;
         int proteinCount = getProteinCount(protein);
         double proteinMerit = linearlyScaledPercent(proteinCount, Merit.NEW_HARVESTER_PROTEIN_THRESHOLD, Merit.NEW_HARVESTER_MIN_PROTEIN_MERIT, Merit.NEW_HARVESTER_MAX_PROTEIN_MERIT);
-        double closeEnemyMerit = pathing.entitiesWithinDistance(tuple.target(), 2).stream()
+        double closeEnemyMerit = pathing.entitiesWithinDistance(proteinTarget, 2).stream()
                 .filter(Entity::enemy)
-                .count() * Merit.NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY;
-        double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit;
-//        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, tuple.target().getType(), tuple.buildableTile()));
-//        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
-//        debug(String.format("\t %.2f from lack of protein", proteinMerit));
-        return new MeritResult(tuple.mine(), tuple.buildableTile().directionTo(tuple.target()), tuple.buildableTile(), buildMerit);
+                .count() * Merit.NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY_MERIT;
+        double harvestableProteinsMerit = buildOption.to().neighborsStream()
+                .filter(neighbor -> neighbor.getType().isProtein() && !neighbor.isHarvestedByMe())
+                .count() * Merit.NEW_HARVESTER_TILE_HARVESTABLE_PROTEINS_MERIT;
+        // If this is the last harvester we can build, make sure we have at least 1 C and D income so we can continue to build harvesters in the future
+        int nextTurnCProtein = myC + myHarvesterCountMap.get(EntityType.C) + (protein == EntityType.C ? 1 : 0) - 1;
+        int nextTurnDProtein = myD + myHarvesterCountMap.get(EntityType.D) + (protein == EntityType.D ? 1 : 0) - 1;
+        double noFutureHarvestersMerit = (nextTurnCProtein == 0 || nextTurnDProtein == 0) ? Merit.NEW_HARVESTER_NO_FUTURE_HARVESTERS : 0;
+        double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit + harvestableProteinsMerit + noFutureHarvestersMerit;
+        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, protein, buildOption.to()));
+        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
+        debug(String.format("\t %.2f from lack of protein", proteinMerit));
+        debug(String.format("\t %.2f from harvesting close to enemy", closeEnemyMerit));
+        debug(String.format("\t %.2f from using last proteins", noFutureHarvestersMerit));
+        return buildMerit;
     }
 
     private double getRootMeritFromNearbyTile(Entity source, Entity closeByEntity) {
-        int distance = pathing.distance(source, closeByEntity);
+        Integer distance = pathing.distance(source, closeByEntity);
+        if(distance == null) {
+            return 0;
+        }
         List<Double> meritByDistance = Merit.NEW_ROOT_MERIT_FROM_PROTEIN_BY_DISTANCE;
         double meritImpact = 0;
         if (closeByEntity.getType().isProtein() && distance < meritByDistance.size()) {

@@ -36,8 +36,6 @@ Large plentiful map
 
 
 Current Top Things To Work On:
-    Cache entities and buildable neighbors
-    Harvester placement - try all possible spots, demerits for smashing current harvester
     Attacking - Make sure killing a high value enemy wins when attacking (seed 366941678159574140 vs #4 Indrill turn 35)
 
 
@@ -112,7 +110,7 @@ Movement
     Cs double up on harvesters and tentacles, both important. Bs are needed for sporers, not as important, especially as the game moves on.
     Place arbitrary entities in a meaningful direction
 Harvesters
-    When can be placed in multiple spots, prioritize not blocking other proteins and going in a direction we want to go in
+[done]    When can be placed in multiple spots, prioritize not blocking other proteins and going in a direction we want to go in
     Can create sprorer first turn and harvest next turn due to expansion, need expand logic to incorporate future harvesters
 Attacking
     If I can't fight, don't expand towards the enemy. People's algorithms will typically fight when I come close.
