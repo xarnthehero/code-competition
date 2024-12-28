@@ -126,11 +126,11 @@ Map Control
 --12/27/24 Rank 123 Gold analysis and improvement ideas--
 Many of the previous observations are still relevant and need improvements.
 General
-    There are many things I should be calculating and caching every turn:
-        My entities per root id
-        Buildable neighbors per root id
-        If a tile is harvested by me or an opponent
-        If a tile is attacked by me or an opponent
+[Done]    There are many things I should be calculating and caching every turn:
+[Done]        My entities per root id
+[Done]        Buildable neighbors per root id
+[Done]        If a tile is harvested by me or an opponent
+[Done]        If a tile is attacked by me or an opponent
 Sporer
     Need to consider resources that I am currently 1 and 2 spaces away from when expanding. I had a game where I am close to many D proteins and expanded to more D proteins, had no Cs.
     I had this note above, but prioritization of different proteins based on the state of the game, don't treat all equally. I only need Ds if my harvester count is not where it should be. Cs are the most important.

@@ -1,6 +1,7 @@
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -15,12 +16,13 @@ class Player {
     private Pathing pathing;
     private final Timer timer = new Timer();
     private final HashMap<Integer, Entity> entitiesById = new HashMap<>();
-    private final HashMap<Integer, List<Entity>> rootIdToDescendents = new HashMap<>();   // All descendents for a given root id
+    private final HashMap<Integer, List<Entity>> rootToDescendentsMap = new HashMap<>();             // All descendents for a given root id
+    private final HashMap<Integer, List<Entity>> rootToBuildableAdjacentTilesMap = new HashMap<>();  // All adjacent buildable neighbors, calculated every turn
     private final List<Entity> myRoots = new ArrayList<>();
     private final Map<Entity, Double> buildRootMeritMap = new HashMap<>();
     private final Map<Entity, Double> expandMeritMap = new HashMap<>();
-    private Map<EntityType, Integer> myHarvesterCountMap = new HashMap<>();                  // The number of harvesters per protein type I have
-    private Map<EntityType, Integer> enemyHarvesterCountMap = new HashMap<>();               // The number of harvesters per protein type my enemy has
+    private Map<EntityType, Integer> myHarvesterCountMap = new HashMap<>();                         // The number of harvesters per protein type I have
+    private Map<EntityType, Integer> enemyHarvesterCountMap = new HashMap<>();                      // The number of harvesters per protein type my enemy has
     private int myA;
     private int myB;
     private int myC;
@@ -252,13 +254,19 @@ class Player {
     }
 
     private static class EntityPredicates {
-        public static final Predicate<Entity> HARVESTED_BY_ME = entity -> entity.getType().isProtein()
-                && entity.myNeighbor(myNeighbor ->
-                myNeighbor.getType().equals(EntityType.HARVESTER)
-                        && myNeighbor.directionTo(entity).equals(myNeighbor.getDirection())) != null;
+        public static final BiPredicate<Entity, Integer> HARVESTED_BY = (harvestedProtein, owner) -> harvestedProtein.getType().isProtein()
+                && harvestedProtein.neighbors().stream()
+                .anyMatch(harvester -> harvester.getType().equals(EntityType.HARVESTER)
+                        && harvester.entityInFront() == harvestedProtein
+                        && harvester.getOwner() == owner
+                );
         public static final Predicate<Entity> SHOOT_ROOT_OVER = entity -> entity.getType().isProtein() || entity.getType().equals(EntityType.EMPTY);
-        public static final Predicate<Entity> ENEMY_NOT_ATTACKING = entity -> entity.neighborsStream()
-                .noneMatch(enemy -> enemy.enemy() && enemy.getType().equals(EntityType.TENTACLE) && enemy.entityInFront() == entity);
+        public static final BiPredicate<Entity, Integer> ATTACKED_BY = (entity, owner) -> entity.neighborsStream()
+                .anyMatch(neighbor -> neighbor.getType().equals(EntityType.TENTACLE)
+                        && neighbor.entityInFront() == entity
+                        && neighbor.getOwner() == owner
+                );
+        public static final BiPredicate<Entity, Integer> NOT_ATTACKED_BY = EntityPredicates.ATTACKED_BY.negate();
     }
 
     private static class Entity {
@@ -279,6 +287,14 @@ class Player {
         private EntityCopy ghostlyRealState;
         private Direction direction;
 
+        // Cached values
+        private Boolean buildable;          // Calculated value that gets cached here, recalculated every turn if needed
+        private Integer descendantCount;    // Number of descendants for this entity (relevant for kills)
+        private Boolean harvestedByMe;
+        private Boolean harvestedByOpponent;
+        private Boolean attackedByMe;
+        private Boolean attackedByEnemy;
+
         public Entity(Grid grid, int x, int y) {
             this.grid = grid;
             this.x = x;
@@ -288,7 +304,7 @@ class Player {
         }
 
         public void reset() {
-            if(ghostlyRealState != null) {
+            if (ghostlyRealState != null) {
                 lastTurnState = ghostlyRealState;
                 ghostlyRealState = null;
             } else {
@@ -297,6 +313,11 @@ class Player {
             type = EntityType.EMPTY;
             children.clear();
             owner = Owner.NOBODY;
+            // Cached calculated values
+            buildable = null;
+            descendantCount = null;
+            harvestedByMe = null;
+            harvestedByOpponent = null;
         }
 
         public int getId() {
@@ -381,6 +402,10 @@ class Player {
 
         public void setOwner(int owner) {
             this.owner = owner;
+        }
+
+        public int getOwner() {
+            return owner;
         }
 
         public Player.Direction getDirection() {
@@ -474,7 +499,24 @@ class Player {
         }
 
         public boolean isBuildable() {
-            return (isEmpty() || type.isProtein()) && EntityPredicates.ENEMY_NOT_ATTACKING.test(this);
+            if (buildable == null) {
+                buildable = (isEmpty() || type.isProtein()) && EntityPredicates.NOT_ATTACKED_BY.test(this, Owner.ENEMY);
+            }
+            return buildable;
+        }
+
+        public boolean isAttackedByMe() {
+            if (attackedByMe == null) {
+                attackedByMe = EntityPredicates.ATTACKED_BY.test(this, Owner.ME);
+            }
+            return attackedByMe;
+        }
+
+        public boolean isAttackedByEnemy() {
+            if (attackedByEnemy == null) {
+                attackedByEnemy = EntityPredicates.ATTACKED_BY.test(this, Owner.ENEMY);
+            }
+            return attackedByEnemy;
         }
 
         public Player.Direction directionTo(Entity other) {
@@ -485,8 +527,25 @@ class Player {
             return other.getY() - y > 0 ? Player.Direction.S : Player.Direction.N;
         }
 
-        public int descendentCount() {
-            return children.size() + children.stream().mapToInt(Entity::descendentCount).sum();
+        public int getDescendantCount() {
+            if (descendantCount == null) {
+                descendantCount = children.size() + children.stream().mapToInt(Entity::getDescendantCount).sum();
+            }
+            return descendantCount;
+        }
+
+        public boolean isHarvestedByMe() {
+            if (harvestedByMe == null) {
+                harvestedByMe = EntityPredicates.HARVESTED_BY.test(this, Owner.ME);
+            }
+            return harvestedByMe;
+        }
+
+        public boolean isHarvestedByEnemy() {
+            if (harvestedByOpponent == null) {
+                harvestedByOpponent = EntityPredicates.HARVESTED_BY.test(this, Owner.ENEMY);
+            }
+            return harvestedByOpponent;
         }
 
         @Override
@@ -495,7 +554,8 @@ class Player {
         }
 
         // When we build a "ghost" entity to replace the current state of an entity for processing this turn, record the current "real" state for use in next turn's reconciliation.
-        private record EntityCopy(EntityType type, Direction direction, int owner) {}
+        private record EntityCopy(EntityType type, Direction direction, int owner) {
+        }
     }
 
     private interface Behavior {
@@ -518,8 +578,7 @@ class Player {
                     })
                     .map(direction -> new MeritResult(entity.myNeighbor(rootId), direction, entity, null));
 
-            MeritResult attackResult = grid.adjacentToMine(rootId)
-                    .filter(Entity::isBuildable)
+            MeritResult attackResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
                     .filter(entity -> pathing.entitiesWithinDistance(entity, 3).stream().anyMatch(Entity::enemy))
                     .flatMap(entityToDirectionTupleMapper)
                     .map(result -> new MeritResult(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
@@ -588,7 +647,7 @@ class Player {
             if (!canBuild(Player.EntityType.HARVESTER)) {
                 return null;
             }
-            Predicate<Entity> harvestablePredicate = entity -> entity.getType().isProtein() && !EntityPredicates.HARVESTED_BY_ME.test(entity);
+            Predicate<Entity> harvestablePredicate = entity -> entity.getType().isProtein() && !entity.isHarvestedByMe();
             List<BuildEntityTuple> possibleHarvesterBuilds = getPossibleBuildsWithTarget(rootId, harvestablePredicate);
             if (possibleHarvesterBuilds.isEmpty()) {
                 return null;
@@ -611,8 +670,7 @@ class Player {
             // Get adjacent buildable spaces
             // Get merit ranking for building there
             // Sort by ranking
-            MeritResult bestExpandResult = grid.adjacentToMine(rootId)
-                    .filter(Entity::isBuildable)
+            MeritResult bestExpandResult = rootToBuildableAdjacentTilesMap.get(rootId).stream()
                     .map(entity -> new MeritResult(entity.myNeighbor(rootId), null, entity, calculateExpandMerit(entity)))
 //                    .peek(result -> debug(String.format("%.2f merit expanding to %s", result.merit(), result.to())))
                     .max(Comparator.comparingDouble(MeritResult::merit))
@@ -790,12 +848,8 @@ class Player {
     }
 
     private List<BuildEntityTuple> getPossibleBuildsWithTarget(int rootId, Predicate<Entity> targetPredicate) {
-        List<Entity> buildableTiles = grid.adjacentToMine(rootId)
-                .filter(Entity::isBuildable)
-                .distinct()
-                .toList();
         List<BuildEntityTuple> tuples = new ArrayList<>();
-        for (Entity emptyTile : buildableTiles) {
+        for (Entity emptyTile : rootToBuildableAdjacentTilesMap.get(rootId)) {
             emptyTile.neighborsStream().filter(targetPredicate).forEach(target -> {
                 tuples.add(new BuildEntityTuple(emptyTile.myNeighbor(rootId), emptyTile, target));
             });
@@ -856,14 +910,13 @@ class Player {
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
                     .map(entity -> new MeritResult(entity, entity.getDirection(), null, null));
         } else {
-            sporeDirectionStream = grid.adjacentToMine(rootId)
-                    .filter(Entity::isBuildable)
+            sporeDirectionStream = rootToBuildableAdjacentTilesMap.get(rootId).stream()
                     .flatMap(entityToDirectionTupleMapper);
         }
 
         return sporeDirectionStream
                 .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new MeritResult(result.from(), result.direction(), potentialRootTile, null)))
-                .filter(result -> EntityPredicates.ENEMY_NOT_ATTACKING.test(result.to()))
+                .filter(result -> result.to().isBuildable())
                 .map(result -> {
                     double totalMerit = calculateRootMerit(result.to()) + getRootMeritWithSource(result.from(), result.to());
                     return new MeritResult(result.from(), result.direction(), result.to(), totalMerit);
@@ -979,7 +1032,7 @@ class Player {
     }
 
     private double getLocationExpandMerit(Entity source) {
-        return (EntityPredicates.HARVESTED_BY_ME.test(source) ? Merit.NEW_EXPANSION_CONSUME_HARVESTED_PROTEIN_MERIT : 0)
+        return (source.isHarvestedByMe() ? Merit.NEW_EXPANSION_CONSUME_HARVESTED_PROTEIN_MERIT : 0)
                 + (turn >= 70 ? Merit.NEW_EXPANSION_LATE_GAME_EXPAND_MERIT : 0)
                 + (source.getType().isProtein() && getProteinCount(source.getType()) == 0 ? Merit.NEW_EXPANSION_NEED_PROTEIN_MERIT : 0)
                 ;
@@ -1050,7 +1103,7 @@ class Player {
 
         boolean goingInRightDirection;
         boolean kill = false;
-        if(nextEntity == enemy) {
+        if (nextEntity == enemy) {
             goingInRightDirection = true;
             kill = true;
         } else {
@@ -1061,7 +1114,7 @@ class Player {
             goingInRightDirection = nextPathInfo.distance() < pathInfo.distance();
         }
 
-        int distanceInDirection = switch(buildDirection) {
+        int distanceInDirection = switch (buildDirection) {
             case N -> Math.max(0, newTentacle.getY() - enemy.getY());
             case S -> Math.max(0, enemy.getY() - newTentacle.getY());
             case W -> Math.max(0, newTentacle.getX() - enemy.getX());
@@ -1070,28 +1123,27 @@ class Player {
 
         double closeToEnemyMerit = goingInRightDirection ? enemyDistanceMerits.get(distance - 1) : 0;
         double killParentMerit = kill ? Merit.NEW_ATTACKER_PARENT_KILL_MERIT : 0;
-        double killChildMerit = kill ? enemy.getChildren().size() * Merit.NEW_ATTACKER_CHILD_KILL_MERIT : 0;
+        double killChildMerit = kill ? enemy.getDescendantCount() * Merit.NEW_ATTACKER_CHILD_KILL_MERIT : 0;
         double distanceMerit = Merit.NEW_ATTACKER_POINTED_AT_ENEMY * distanceInDirection;
 //        debug(String.format("Attack merits for %s %s   %.2f  %.2f  %.2f  %.2f  attacking %s", newTentacle, buildDirection, closeToEnemyMerit, killParentMerit, killChildMerit, distanceMerit, enemy));
         return closeToEnemyMerit + killParentMerit + killChildMerit + distanceMerit;
     }
 
     private double getLocationAttackMerit(Entity newTentacle) {
-        Entity myNeighborAttackingNewTentacle = newTentacle.myNeighbor(entity -> entity.getType().equals(EntityType.TENTACLE) && entity.entityInFront() == newTentacle);
         return (newTentacle.getType().isProtein() ? Merit.NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT : 0)
-                + (myNeighborAttackingNewTentacle != null ? Merit.NEW_ATTACKER_TILE_CONTROL_MERIT : 0)
+                + (newTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_TILE_CONTROL_MERIT : 0)
                 ;
     }
 
-    private List<Behavior> silverLeagueBehaviors() {
-        return Arrays.asList(new Behavior[]{
+    private List<Behavior> goldLeagueBehaviors() {
+        return Arrays.asList(
                 new AttackBehavior(),
                 new CreateNewRootBehavior(),
                 new CreateSporerBehavior(),
                 new BuildHarvesterBehavior(),
                 new ExpandToSpaceBehavior(),
-                new WaitBehavior(),
-        });
+                new WaitBehavior()
+        );
     }
 
     private void newTurn() {
@@ -1100,7 +1152,8 @@ class Player {
         debug("Start of turn " + turn);
         myRoots.clear();
         entitiesById.clear();
-        rootIdToDescendents.clear();
+        rootToDescendentsMap.clear();
+        rootToBuildableAdjacentTilesMap.clear();
         grid.getEntitySet().forEach(Entity::reset);
         grid.getProteins().clear();
         buildRootMeritMap.clear();
@@ -1116,7 +1169,22 @@ class Player {
 
         myRoots.sort(Comparator.comparingInt(Entity::getId));
 
-        if(turn > 1) {
+        // Cache the list of organisms for each root id along with the neighbors we can build on
+        myRoots.forEach(rootEntity -> {
+            rootToDescendentsMap.put(rootEntity.getId(), new ArrayList<>());
+            rootToBuildableAdjacentTilesMap.put(rootEntity.getId(), new ArrayList<>());
+        });
+        grid.myEntitiesStream().forEach(entity -> rootToDescendentsMap.get(entity.getRootId()).add(entity));
+        myRoots.forEach(rootEntity -> {
+            List<Entity> buildableNeighbors = rootToDescendentsMap.get(rootEntity.getRootId()).stream()
+                    .flatMap(Entity::neighborsStream)
+                    .distinct()
+                    .filter(Entity::isBuildable)
+                    .toList();
+            rootToBuildableAdjacentTilesMap.put(rootEntity.getId(), buildableNeighbors);
+        });
+
+        if (turn > 1) {
             // Process changed entities
             // Reprocess pathing for all changes in walls and their neighbors
             // If we start hitting processing timeouts, we can modify this behavior to reprocess fewer tiles or set a limit on search distance
@@ -1126,20 +1194,13 @@ class Player {
                     .forEach(entity -> pathing.generatePaths(entity));
         }
 
-        myHarvesterCountMap = grid.myEntitiesStream()
-                .filter(entity -> entity.getType().equals(EntityType.HARVESTER))
-                .map(Entity::entityInFront)
-                .filter(entity -> entity != null && entity.getType().isProtein())
-                .distinct()
+        myHarvesterCountMap = grid.getProteins().stream()
+                .filter(Entity::isHarvestedByMe)
                 .map(Entity::getType)
                 .collect(Collectors.groupingBy(w -> w, Collectors.collectingAndThen(Collectors.counting(), Long::intValue)));
 
-        enemyHarvesterCountMap = grid.getEntitySet().stream()
-                .filter(Entity::enemy)
-                .filter(entity -> entity.getType().equals(EntityType.HARVESTER))
-                .map(Entity::entityInFront)
-                .filter(entity -> entity != null && entity.getType().isProtein())
-                .distinct()
+        enemyHarvesterCountMap = grid.getProteins().stream()
+                .filter(Entity::isHarvestedByEnemy)
                 .map(Entity::getType)
                 .collect(Collectors.groupingBy(w -> w, Collectors.collectingAndThen(Collectors.counting(), Long::intValue)));
 
@@ -1189,7 +1250,6 @@ class Player {
                 entity.setParentId(in.nextInt());
                 entity.setRootId(in.nextInt());
                 entitiesById.put(entity.getId(), entity);
-                rootIdToDescendents.computeIfAbsent(entity.getRootId(), k -> new ArrayList<>()).add(entity);
             }
             timer.end("Reading Entities");
             myA = in.nextInt();
@@ -1207,7 +1267,7 @@ class Player {
 
             if (turn == 1) {
                 pathing.generatePaths();
-                behaviors.addAll(silverLeagueBehaviors());
+                behaviors.addAll(goldLeagueBehaviors());
             }
 
             List<String> commandText = getCommands(requiredActionsCount).stream()
