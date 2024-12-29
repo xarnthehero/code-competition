@@ -333,6 +333,7 @@ class Player {
             // After doing a ghost build, refresh calculated values that I may use during on turn
             buildable = null;
             harvestedByMe = null;
+            attackedByMe = null;
         }
 
         public int getId() {
@@ -825,7 +826,7 @@ class Player {
             }
             debug("Commands considered:");
             for (Command command : possibleCommands) {
-                debug("\t" + command);
+                debug(command, DebugCategory.GENERAL, 1);
             }
             Command bestCommand = possibleCommands.stream().max(Comparator.comparingDouble(Command::merit)).orElseThrow(() -> new IllegalStateException("No command found"));
             debug("Executing command " + bestCommand);
@@ -982,18 +983,20 @@ class Player {
 
         // -- New Attacker --
         // Merit for pointing in the direction of an enemy 1, 2, 3 spaces away. 1 space is covered below by killing, building 1 space away pointing the wrong way doesn't help.
-        public static final List<Double> NEW_ATTACKER_DISTANCE_FROM_ENEMY_MERIT = Arrays.asList(0.0, 10., 10.);
+        public static final List<Double> NEW_ATTACKER_DISTANCE_FROM_ENEMY_MERIT = Arrays.asList(0.0, 6.0, 6.0, 2.0);
         // Get a small merit bonus to break ties between two directions we could be pointing. Ex if building down and enemies are to the south east, point east.
         public static final double NEW_ATTACKER_POINTED_AT_ENEMY = .2;
         // Get a kill - build distance 1 away and pointing in the right direction
-        public static final double NEW_ATTACKER_PARENT_KILL_MERIT = 6;
+        public static final double NEW_ATTACKER_PARENT_KILL_MERIT = 10;
         // Merit for each child of the parent killed. Not sure yet if this is an important distinction, or if a kill is a kill
         public static final double NEW_ATTACKER_CHILD_KILL_MERIT = 1;
         // If a protein is contested, better we take it than the opponent
         public static final double NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT = 3;
         // If we are already pointing an attacker at the tile we are considering building in, it isn't as important to build there because the enemy can't
         // It still may be important if the enemy could build up a tentacle coming into this square and us building one would prevent that (both new tentacles die)
-        public static final double NEW_ATTACKER_TILE_CONTROL_MERIT = -2;
+        public static final double NEW_ATTACKER_TILE_CONTROLED_MERIT = -2;
+        // If we can point two directions and we already have someone attacking one square, go the other way
+        public static final double NEW_ATTACKER_ATTACKING_TILE_CONTROLLED_MERIT = -2;
     }
 
     /**
@@ -1075,11 +1078,11 @@ class Player {
         int nextTurnDProtein = myD + myHarvesterCountMap.get(EntityType.D) + (protein == EntityType.D ? 1 : 0) - 1;
         double noFutureHarvestersMerit = (nextTurnCProtein == 0 || nextTurnDProtein == 0) ? Merit.NEW_HARVESTER_NO_FUTURE_HARVESTERS : 0;
         double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit + harvestableProteinsMerit + noFutureHarvestersMerit;
-        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, protein, buildOption.to()));
-        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
-        debug(String.format("\t %.2f from lack of protein", proteinMerit));
-        debug(String.format("\t %.2f from harvesting close to enemy", closeEnemyMerit));
-        debug(String.format("\t %.2f from using last proteins", noFutureHarvestersMerit));
+//        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, protein, buildOption.to()));
+//        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
+//        debug(String.format("\t %.2f from lack of protein", proteinMerit));
+//        debug(String.format("\t %.2f from harvesting close to enemy", closeEnemyMerit));
+//        debug(String.format("\t %.2f from using last proteins", noFutureHarvestersMerit));
         return buildMerit;
     }
 
@@ -1107,10 +1110,15 @@ class Player {
     private double calculateAttackMerit(Entity newTentacle, Direction buildDirection) {
         // Points for pointing at nearby enemies where the next direction is our attack direction
         // Points for enemies that are 1 or 2 spaces away?
-        return pathing.entitiesWithinDistance(newTentacle, 3).stream()
+        debug("Calculating attack merit for " + newTentacle + " " + buildDirection, DebugCategory.ATTACK);
+        double nearbyEnemyMerit = pathing.entitiesWithinDistance(newTentacle, 3).stream()
                 .filter(Entity::enemy)
                 .mapToDouble(protein -> getNearbyEnemyAttackMerit(newTentacle, buildDirection, protein))
-                .sum() + getLocationAttackMerit(newTentacle);
+                .sum();
+        debug(String.format("%.2f nearby enemy merit total", nearbyEnemyMerit), DebugCategory.ATTACK, 1);
+        double attackLocationMerit = getLocationAttackMerit(newTentacle, buildDirection);
+        debug(String.format("%.2f attack location merit total", attackLocationMerit), DebugCategory.ATTACK, 1);
+        return nearbyEnemyMerit + attackLocationMerit;
     }
 
     private double getNearbyEnemyAttackMerit(Entity newTentacle, Direction buildDirection, Entity enemy) {
@@ -1146,18 +1154,32 @@ class Player {
             case E -> Math.max(0, enemy.getX() - newTentacle.getX());
         };
 
+        myAssert(distance < enemyDistanceMerits.size(), String.format("%s to %s has distance %s", newTentacle, enemy, distance));
         double closeToEnemyMerit = goingInRightDirection ? enemyDistanceMerits.get(distance - 1) : 0;
-        double killParentMerit = kill ? Merit.NEW_ATTACKER_PARENT_KILL_MERIT : 0;
-        double killChildMerit = kill ? enemy.getDescendantCount() * Merit.NEW_ATTACKER_CHILD_KILL_MERIT : 0;
+        int killCount = kill ? 1 + enemy.getDescendantCount() : 0;
+        double killMerit = killCount * Merit.NEW_ATTACKER_PARENT_KILL_MERIT;
         double distanceMerit = Merit.NEW_ATTACKER_POINTED_AT_ENEMY * distanceInDirection;
-//        debug(String.format("Attack merits for %s %s   %.2f  %.2f  %.2f  %.2f  attacking %s", newTentacle, buildDirection, closeToEnemyMerit, killParentMerit, killChildMerit, distanceMerit, enemy));
-        return closeToEnemyMerit + killParentMerit + killChildMerit + distanceMerit;
+        double totalMeritFromEnemy = closeToEnemyMerit + killMerit + distanceMerit;
+        debug(String.format("%.2f from attacking " + enemy + "  %.2f  %.2f  %.2f", totalMeritFromEnemy, closeToEnemyMerit, killMerit, distanceMerit), DebugCategory.ATTACK, 2);
+        return totalMeritFromEnemy;
     }
 
-    private double getLocationAttackMerit(Entity newTentacle) {
-        return (newTentacle.getType().isProtein() ? Merit.NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT : 0)
-                + (newTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_TILE_CONTROL_MERIT : 0)
-                ;
+    private double getLocationAttackMerit(Entity newTentacle, Direction buildDirection) {
+        Entity entityInFrontOfTentacle = newTentacle.entityInDirection(buildDirection);
+        myAssert(entityInFrontOfTentacle != null, "Attacking into nothing from " + newTentacle + " " + buildDirection);
+        double buildOnProteinMerit = newTentacle.getType().isProtein() ? Merit.NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT : 0;
+        double attackedByMeMerit = newTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_TILE_CONTROLED_MERIT : 0;
+        double attackingControlledTileMerit = entityInFrontOfTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_ATTACKING_TILE_CONTROLLED_MERIT : 0;
+        if(buildOnProteinMerit != 0) {
+            debug(String.format("\t\t%.2f for building on protein", buildOnProteinMerit), DebugCategory.ATTACK);
+        }
+        if(attackedByMeMerit != 0) {
+            debug(String.format("\t\t%.2f for already controlling tile", attackedByMeMerit), DebugCategory.ATTACK);
+        }
+        if(buildOnProteinMerit != 0) {
+            debug(String.format("\t\t%.2f for attacking already controlled tile", attackingControlledTileMerit), DebugCategory.ATTACK);
+        }
+        return buildOnProteinMerit + attackedByMeMerit + attackingControlledTileMerit;
     }
 
     private List<Behavior> goldLeagueBehaviors() {
@@ -1305,11 +1327,13 @@ class Player {
 
     enum DebugCategory {
         GENERAL,
+        ATTACK,
         TIMER
     }
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
             DebugCategory.GENERAL, true,
+            DebugCategory.ATTACK, false,
             DebugCategory.TIMER, false
     );
 
@@ -1318,8 +1342,16 @@ class Player {
     }
 
     private void debug(Object message, DebugCategory category) {
+        debug(message, category, 0);
+    }
+
+    private void debug(Object message, DebugCategory category, int indentionLevel) {
         boolean print = debugCategoryMap.get(category);
+        String indent = "";
         if (print) {
+            if(indentionLevel > 0) {
+                message = String.join("", Collections.nCopies(indentionLevel, "  ")) + message;
+            }
             if (currentRootId != null) {
                 message = "[" + currentRootId + "] " + message;
             }
