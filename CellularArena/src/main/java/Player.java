@@ -149,6 +149,10 @@ class Player {
             this.maxDepth = maxDepth;
         }
 
+        public int getProteinNeighborMaxDepth() {
+            return proteinNeighborMaxDepth;
+        }
+
         public Integer distance(Entity from, Entity to) {
             return Optional.ofNullable(pathInfo(from, to))
                     .map(PathInfo::distance)
@@ -194,14 +198,18 @@ class Player {
             return pathInfosWithinDistance(sortedPathsMap.get(from), minSearchDistance, maxSearchDistance).stream().map(PathInfo::from).toList();
         }
 
-        public List<Entity> entitiesWithinDistance(Entity from, Entity impassableProtein, Integer minSearchDistance, Integer maxSearchDistance) {
+        private List<Entity> entitiesWithinDistance(Entity from, Entity impassableProtein, Integer minSearchDistance, Integer maxSearchDistance) {
             return pathInfosWithinDistance(proteinNeighborSortedPathsMap.get(new EntityPair(impassableProtein, from)), minSearchDistance, maxSearchDistance).stream().map(PathInfo::from).toList();
+        }
+
+        public List<Entity> proteinEntitiesWithinDistance(Entity from, Entity protein) {
+            return entitiesWithinDistance(from, protein, null, proteinNeighborMaxDepth);
         }
 
         // Return the entities within proteinNeighborMaxDepth that are reachable when the protein is passable and when it is impassable
         public Tuple<List<Entity>, List<Entity>> proteinReachableEntityDifference(Entity protein, Entity proteinNeighbor) {
             List<Entity> reachable = entitiesWithinDistance(proteinNeighbor, null, proteinNeighborMaxDepth);
-            List<Entity> reachableWithoutProtein = entitiesWithinDistance(proteinNeighbor, protein, null, proteinNeighborMaxDepth);
+            List<Entity> reachableWithoutProtein = proteinEntitiesWithinDistance(proteinNeighbor, protein);
             return new Tuple<>(reachable, reachableWithoutProtein);
         }
 
@@ -331,16 +339,6 @@ class Player {
 //            debugf("%s entities found at distance %s", seenEntities.size(), currentSearchDistance);
         }
 
-        public class Tuple<X, Y> {
-            public final X x;
-            public final Y y;
-
-            public Tuple(X x, Y y) {
-                this.x = x;
-                this.y = y;
-            }
-        }
-
         private record SearchIndex(Entity entity, List<Direction> directions, int index) {
         }
 
@@ -359,6 +357,16 @@ class Player {
             }
         }
 
+    }
+
+    public static class Tuple<X, Y> {
+        public final X x;
+        public final Y y;
+
+        public Tuple(X x, Y y) {
+            this.x = x;
+            this.y = y;
+        }
     }
 
     record PathInfo(Entity from, Entity to, int distance, List<Direction> directions) {
@@ -444,6 +452,7 @@ class Player {
         private Boolean harvestedByOpponent;
         private Boolean attackedByMe;
         private Boolean attackedByEnemy;
+        private Boolean proteinHarvestable;
 
         public Entity(Grid grid, int x, int y) {
             this.grid = grid;
@@ -468,6 +477,7 @@ class Player {
             descendantCount = null;
             harvestedByMe = null;
             harvestedByOpponent = null;
+            proteinHarvestable = null;      // For now, recalculate every turn. Can improve this by only resetting to null when we perform actions that make recalculation needed.
         }
 
 
@@ -634,15 +644,17 @@ class Player {
             return entityInDirection(direction);
         }
 
-        public Stream<Entity> entitiesInFront() {
-            return entitiesInFront(direction);
-        }
-
-        public Stream<Entity> entitiesInFront(Direction givenDirection) {
+        public Stream<Entity> entitiesInFront(Direction givenDirection, boolean skippingFirst) {
             List<Entity> entities = new ArrayList<>();
             Entity currentEntity = this.entityInDirection(givenDirection);
+            boolean skipped = false;
+
             while (currentEntity != null && EntityPredicates.SHOOT_ROOT_OVER.test(currentEntity)) {
-                entities.add(currentEntity);
+                if(skipped) {
+                    entities.add(currentEntity);
+                } else {
+                    skipped = true;
+                }
                 currentEntity = currentEntity.entityInDirection(givenDirection);
             }
             return entities.stream();
@@ -679,6 +691,14 @@ class Player {
                 attackedByEnemy = EntityPredicates.ATTACKED_BY.test(this, Owner.ENEMY);
             }
             return attackedByEnemy;
+        }
+
+        public Boolean isProteinHarvestable() {
+            return proteinHarvestable;
+        }
+
+        public void setProteinHarvestable(Boolean proteinHarvestable) {
+            this.proteinHarvestable = proteinHarvestable;
         }
 
         public Player.Direction directionTo(Entity other) {
@@ -765,7 +785,7 @@ class Player {
     private class CreateSporerBehavior implements Behavior {
         @Override
         public Command getCommand(int rootId) {
-            if (!shouldConsiderNewRoot(true)) {
+            if(!canBuild(EntityType.SPORER)) {
                 return null;
             }
             BuildOption mostMerit = getRootExpandLocation(rootId, false);
@@ -811,9 +831,9 @@ class Player {
             }
             BuildOption harvesterToBuild = grid.getBuildOptionStream(rootId, entity -> true)
                     .filter(buildOption -> {
-                        Entity pointedAt = buildOption.to().entityInDirection(buildOption.direction());
+                        Entity pointedAt = buildOption.toPointedAt();
                         return pointedAt.getType().isProtein() && !pointedAt.isHarvestedByMe();
-                    }).filter(Player.this::isProteinHarvestable)
+                    }).filter(buildOption -> Player.this.isProteinCurrentlyHarvestable(buildOption.toPointedAt()))
                     .map(buildOption -> new BuildOption(buildOption.from(), buildOption.direction(), buildOption.to(), getHarvesterExpandMeritResult(buildOption)))
                     .max(Comparator.comparingDouble(BuildOption::merit))
                     .orElse(null);
@@ -1008,6 +1028,9 @@ class Player {
     }
 
     private record BuildOption(Entity from, Direction direction, Entity to, Double merit) {
+        public Entity toPointedAt() {
+            return to.entityInDirection(direction);
+        }
     }
 
     private boolean canBuild(EntityType type) {
@@ -1048,16 +1071,16 @@ class Player {
 
     /**
      * @param rootId           The rootId for the entity
-     * @param useExistingSpore True if we want to try spawning a root from an existing spore, false if are looking
+     * @param buildingRoot True if we want to try spawning a root from an existing spore, false if are looking
      *                         to create a spore, then spawn a root next turn.
      * @return The result of all possibilities for new ROOT expansion
      */
-    private BuildOption getRootExpandLocation(int rootId, boolean useExistingSpore) {
+    private BuildOption getRootExpandLocation(int rootId, boolean buildingRoot) {
         Function<Entity, Stream<BuildOption>> entityToDirectionTupleMapper = entity -> Arrays.stream(Direction.values()).map(direction -> new BuildOption(entity, direction, null, null));
 
         // Stream with the place we want to place a spore and its direction
         Stream<BuildOption> sporeDirectionStream;
-        if (useExistingSpore) {
+        if (buildingRoot) {
             sporeDirectionStream = grid.myEntitiesStream()
                     .filter(entity -> entity.getRootId() == rootId)
                     .filter(entity -> entity.getType().equals(EntityType.SPORER))
@@ -1068,12 +1091,13 @@ class Player {
         }
 
         return sporeDirectionStream
-                .flatMap(result -> result.from().entitiesInFront(result.direction()).map(potentialRootTile -> new BuildOption(result.from(), result.direction(), potentialRootTile, null)))
+                .flatMap(result ->
+                        // Skip first entity because it probably won't make sense to create a new root right in front of where we are, just expand there
+                        result.from().entitiesInFront(result.direction(), true)
+                        .map(potentialRootTile -> new BuildOption(result.from(), result.direction(), potentialRootTile, null))
+                )
                 .filter(result -> result.to().isBuildable())
-                .map(result -> {
-                    double totalMerit = calculateRootMerit(result.to()) + getRootMeritWithSource(result.from(), result.to());
-                    return new BuildOption(result.from(), result.direction(), result.to(), totalMerit);
-                })
+                .map(result -> new BuildOption(result.from(), result.direction(), result.to(), calculateRootMerit(result.from(), result.to(), buildingRoot)))
 //                    .peek(result -> debug(String.format("%s [%s] from %s %s to %s", this, result.merit(), result.from(), result.direction(), result.to())))
                 .max(Comparator.comparingDouble(BuildOption::merit))
                 .orElse(null);
@@ -1151,23 +1175,49 @@ class Player {
     /**
      * Ideally, we create a root that is 2 spaces away from proteins (for harvesting) and far away from everything else.
      */
-    private double calculateRootMerit(Entity newRoot) {
-        return buildRootMeritMap.computeIfAbsent(newRoot, entity ->
+    private double calculateRootMerit(Entity sporer, Entity newRoot, boolean buildingRoot) {
+        double totalMerit = buildRootMeritMap.computeIfAbsent(newRoot, entity ->
                 pathing.entitiesWithinDistance(newRoot, null, 3)
                         .stream()
                         .reduce(0.0, (meritSum, closeByEntity) -> getRootMeritFromNearbyTile(newRoot, closeByEntity) + meritSum, Double::sum)
-                        + getRootMeritFromState(newRoot)
+                        + getRootMeritWithSource(sporer, newRoot, buildingRoot)
         );
+        debug(String.format("%.2f total merit for sporing %s to %s ", totalMerit, sporer, newRoot), DebugCategory.SPORING);
+        return totalMerit;
     }
 
-    private double getRootMeritWithSource(Entity from, Entity newRoot) {
-        return Merit.NEW_ROOT_MERIT_PER_DISTANCE_FROM_SPORER * Math.min(pathing.distance(from, newRoot), Merit.NEW_ROOT_MERIT_MAX_DISTANCE_FOR_BONUS);
-    }
-
-    private double getRootMeritFromState(Entity newRoot) {
+    private double getRootMeritWithSource(Entity from, Entity newRoot, boolean buildingRoot) {
+        int distance = pathing.distance(from, newRoot);
+        double meritForDistanceFromSource = Merit.NEW_ROOT_MERIT_PER_DISTANCE_FROM_SPORER * Math.min(distance, Merit.NEW_ROOT_MERIT_MAX_DISTANCE_FOR_BONUS);
+        int currentRoots = myRoots.size();
         // Give merit based on how many roots we have. Creating a second gives [0], a third gives [1], etc.
-        int entities = myRoots.size();
-        return entities < Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.size() ? Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.get(entities) : Merit.NEW_ROOT_MERIT_DEFAULT;
+        double meritFromNewRoot = currentRoots <= Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.size() ? Merit.NEW_ROOT_MERIT_BY_ENTITY_COUNT.get(currentRoots - 1) : Merit.NEW_ROOT_MERIT_DEFAULT;
+        double meritFromCurrentResources = getRootMeritBasedOnResources(from, newRoot, buildingRoot);
+        debug(String.format("%.2f merit for building root number %s", meritFromNewRoot, (currentRoots + 1)), DebugCategory.SPORING, 1);
+        debug(String.format("%.2f distance merit sporing from %s to %s (distance %s)", meritForDistanceFromSource, from, newRoot, distance), DebugCategory.SPORING, 1);
+        debug(String.format("%.2f resource drain merit", meritFromCurrentResources), DebugCategory.SPORING, 1);
+        return meritForDistanceFromSource + meritFromNewRoot + meritFromCurrentResources;
+    }
+
+    // How much we can afford to build the sporer / root? Give negative merit based on current resources and harvesters.
+    private double getRootMeritBasedOnResources(Entity sporer, Entity newRoot, boolean buildingRoot) {
+        int aCount = myA;
+        int bCount = myB;
+        int cCount = myC;
+        int dCount = myD;
+        Entity buildingEntity = buildingRoot ? newRoot : sporer;
+        if(buildingEntity.getType().isProtein()) {
+            switch(buildingEntity.getType()) {
+                case A: aCount += 3;
+                case B: bCount += 3;
+                case C: cCount += 3;
+                case D: dCount += 3;
+            }
+        }
+        if(shouldConsiderNewRoot(!buildingRoot)) {
+            return -10;
+        }
+        return 0;
     }
 
     private double calculateExpandMerit(Entity source) {
@@ -1207,23 +1257,36 @@ class Player {
         return (Math.max(0, threshold - count) / threshold) * (max - min) + min;
     }
 
-    // Return false if we should not be considering harvesting this protein because it blocks our progress too much
-    private boolean isProteinHarvestable(BuildOption buildOption) {
-        Entity protein = buildOption.to().entityInDirection(buildOption.direction());
-        Pathing.Tuple<List<Entity>, List<Entity>> reachableEntities = pathing.proteinReachableEntityDifference(protein, buildOption.to());
-        List<Entity> reachableWithProtein = reachableEntities.x;
-        List<Entity> reachableWithoutProtein = reachableEntities.y;
-        // If we can reach 70% of tiles without going through this protein, good enough for now to harvest
-        double reachabilityRation = .7;
-        boolean passReachabilityRation = ((double) reachableWithoutProtein.size() / reachableWithProtein.size()) > reachabilityRation;
-        debug(" [" + passReachabilityRation + "] Harvesting " + protein + " reachable from " + buildOption.to(), DebugCategory.HARVEST);
-        return passReachabilityRation;
+    /**
+     * Return false if we should not be considering harvesting this protein because it blocks our progress too much
+     * Calculated by seeing which neighbors are reachable by us without going through the protein.
+     * If a neighbor is not reachable, check how many tiles we are losing out on to decide if harvesting is worth it.
+     */
+    private boolean isProteinCurrentlyHarvestable(Entity protein) {
+        if(protein.isProteinHarvestable() != null) {
+            return protein.isProteinHarvestable();
+        }
+        boolean isHarvestable = protein.neighborsStream()
+                .filter(Entity::isBuildable)
+                .map(neighbor -> new Tuple<>(neighbor, pathing.proteinEntitiesWithinDistance(neighbor, protein)))
+                .filter(neighborWithReachableEntitiesTuple -> neighborWithReachableEntitiesTuple.y.stream().noneMatch(Entity::mine))
+                .noneMatch(neighborWithReachableEntitiesTuple -> {
+                    Entity neighbor = neighborWithReachableEntitiesTuple.x;
+                    List<Entity> reachableEntities = neighborWithReachableEntitiesTuple.y;
+                    // If are cutting off a significant portion of the map, this protein is unharvested. Use the presence of an Entity at max search depth as a proxy for cutting off many tiles.
+                    int maxDistance = reachableEntities.isEmpty() ? 0 : pathing.distance(neighbor, reachableEntities.get(reachableEntities.size() - 1));
+                    return maxDistance == pathing.getProteinNeighborMaxDepth();
+                });
+
+        debug(" [" + isHarvestable + "] Is harvestable answer for " + protein, DebugCategory.HARVEST, 1);
+        protein.setProteinHarvestable(isHarvestable);
+        return isHarvestable;
     }
 
     private double getHarvesterExpandMeritResult(BuildOption buildOption) {
         // Give merit based on how many harvesters we currently have of that type. With zero, give HARVESTER_MERIT[0], etc.
         List<Double> HARVESTER_MERIT_LIST = Merit.NEW_HARVESTER_MERIT_BY_ENTITY_COUNT;
-        Entity proteinTarget = buildOption.to().entityInDirection(buildOption.direction());
+        Entity proteinTarget = buildOption.toPointedAt();
         EntityType protein = proteinTarget.getType();
         int harvesterCount = myHarvesterCountMap.get(protein);
         double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.NEW_HARVESTER_DEFAULT_MERIT;
@@ -1499,7 +1562,7 @@ class Player {
                 firstTurn();
             }
 
-            boolean shortCircuitGame = true;
+            boolean shortCircuitGame = false;
             if (turn == 5 && shortCircuitGame) {
                 throw new RuntimeException("Short circuit game for testing");
             }
@@ -1516,14 +1579,16 @@ class Player {
         GENERAL,
         ATTACK,
         HARVEST,
+        SPORING,
         TIMER
     }
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
             DebugCategory.GENERAL, true,
             DebugCategory.ATTACK, false,
-            DebugCategory.HARVEST, true,
-            DebugCategory.TIMER, false
+            DebugCategory.HARVEST, false,
+            DebugCategory.SPORING, true,
+            DebugCategory.TIMER, true
     );
 
     private void debugf(Object message, Object... args) {
@@ -1539,11 +1604,7 @@ class Player {
     }
 
     private void debug(Object message, DebugCategory category, int indentionLevel) {
-        if (message == null) {
-            message = "null";
-        }
         boolean print = debugCategoryMap.get(category);
-        String indent = "";
         if (print) {
             if (indentionLevel > 0) {
                 message = String.join("", Collections.nCopies(indentionLevel, "  ")) + message;
