@@ -19,6 +19,7 @@ class Player {
     private final HashMap<Integer, List<Entity>> rootToDescendentsMap = new HashMap<>();             // All descendents for a given root id
     private final HashMap<Integer, List<Entity>> rootToBuildableAdjacentTilesMap = new HashMap<>();  // All adjacent buildable neighbors, calculated every turn
     private final List<Entity> myRoots = new ArrayList<>();
+    private final List<Entity> enemyRoots = new ArrayList<>();
     private final Map<Entity, Double> buildRootMeritMap = new HashMap<>();
     private final Map<Entity, Double> expandMeritMap = new HashMap<>();
     private Map<EntityType, Integer> myHarvesterCountMap = new HashMap<>();                         // The number of harvesters per protein type I have
@@ -27,10 +28,6 @@ class Player {
     private int myB;
     private int myC;
     private int myD;
-    private int enemyA;
-    private int enemyB;
-    private int enemyC;
-    private int enemyD;
     private int turn = 0;
     private Integer currentRootId;
     private static final boolean showRootIdOnCommand = false;
@@ -41,6 +38,8 @@ class Player {
         private final Set<Entity> entitySet;
         private final Set<Entity> proteins;
         private final int width, height;
+        private boolean closed;                 // If the map is open or closed off, we can take different strategies
+        private double proteinRatio;            // The ratio of proteins to
 
         public Grid(int width, int height) {
             this.width = width;
@@ -73,6 +72,14 @@ class Player {
             entitySet.forEach(Entity::initNeighbors);
         }
 
+        public int getWidth() {
+            return width;
+        }
+
+        public int getHeight() {
+            return height;
+        }
+
         public Set<Entity> getEntitySet() {
             return entitySet;
         }
@@ -83,6 +90,14 @@ class Player {
 
         public Set<Entity> getProteins() {
             return proteins;
+        }
+
+        public boolean isClosed() {
+            return closed;
+        }
+
+        public void setClosed(boolean closed) {
+            this.closed = closed;
         }
 
         public Entity entityAt(int x, int y) {
@@ -121,9 +136,14 @@ class Player {
 
     private class Pathing {
 
-        private final Map<Entity, Map<Entity, PathInfo>> paths = new HashMap<>();
-        private final Map<Entity, List<PathInfo>> sortedPaths = new HashMap<>();
+        private final Map<Entity, Map<Entity, PathInfo>> pathsMap = new HashMap<>();
+        // A map from protein's neighbors to reachable nodes given that the protein is impassable
+        private final Map<EntityPair, Map<Entity, PathInfo>> proteinNeighborPathsMap = new HashMap<>();
+        private final Map<Entity, List<PathInfo>> sortedPathsMap = new HashMap<>();
+        private final Map<EntityPair, List<PathInfo>> proteinNeighborSortedPathsMap = new HashMap<>();
+        private final Map<Integer, List<Entity>> chokePoints = new HashMap<>();
         private final int maxDepth;
+        private final int proteinNeighborMaxDepth = 8;
 
         public Pathing(int maxDepth) {
             this.maxDepth = maxDepth;
@@ -135,6 +155,12 @@ class Player {
                     .orElse(null);
         }
 
+        public Integer proteinImpassableDistance(Entity protein, Entity proteinNeighbor, Entity to) {
+            return Optional.ofNullable(proteinImpassablePathInfo(protein, proteinNeighbor, to))
+                    .map(PathInfo::distance)
+                    .orElse(null);
+        }
+
         public List<Direction> nextDirections(Entity from, Entity to) {
             return Optional.ofNullable(pathInfo(from, to))
                     .map(PathInfo::directions)
@@ -142,66 +168,114 @@ class Player {
         }
 
         public PathInfo pathInfo(Entity from, Entity to) {
-            return Optional.ofNullable(paths.get(to))
-                    .map(map -> map.get(from)).orElse(null);
+            return Optional.ofNullable(pathsMap.get(from))
+                    .map(map -> map.get(to)).orElse(null);
         }
 
-        public List<Entity> entitiesWithinDistance(Entity from, int searchDistance) {
-            myAssert(searchDistance > 0, "Search distance must be greater than 0");
-            List<PathInfo> pathInfoList = sortedPaths.get(from);
+        public PathInfo proteinImpassablePathInfo(Entity protein, Entity proteinNeighbor, Entity to) {
+            return Optional.ofNullable(proteinNeighborPathsMap.get(new EntityPair(protein, proteinNeighbor)))
+                    .map(map -> map.get(to)).orElse(null);
+        }
+
+        public List<PathInfo> pathInfosWithinDistance(List<PathInfo> pathInfoList, Integer minSearchDistance, Integer maxSearchDistance) {
+            myAssert(minSearchDistance != null || maxSearchDistance != null, "Min or max search distance must be defined");
+            myAssert(minSearchDistance == null || maxSearchDistance == null || minSearchDistance < maxSearchDistance, "Min search distance must be greater than max search distance");
             if (pathInfoList == null) {
                 return Collections.emptyList();
             }
-            PathInfo searchValue = new PathInfo(null, null, searchDistance, null);
+            int startIndex = binarySearchForIndex(pathInfoList, minSearchDistance, true);
+            int endIndex = binarySearchForIndex(pathInfoList, maxSearchDistance, false);
+            // If we didn't find the number, it must be greater than everything that is within distance, return all reachable entities
+            List<PathInfo> pathInfos = endIndex < 0 ? pathInfoList : pathInfoList.subList(startIndex, endIndex + 1);
+            return pathInfos;
+        }
+
+        public List<Entity> entitiesWithinDistance(Entity from, Integer minSearchDistance, Integer maxSearchDistance) {
+            return pathInfosWithinDistance(sortedPathsMap.get(from), minSearchDistance, maxSearchDistance).stream().map(PathInfo::from).toList();
+        }
+
+        public List<Entity> entitiesWithinDistance(Entity from, Entity impassableProtein, Integer minSearchDistance, Integer maxSearchDistance) {
+            return pathInfosWithinDistance(proteinNeighborSortedPathsMap.get(new EntityPair(impassableProtein, from)), minSearchDistance, maxSearchDistance).stream().map(PathInfo::from).toList();
+        }
+
+        // Return the entities within proteinNeighborMaxDepth that are reachable when the protein is passable and when it is impassable
+        public Tuple<List<Entity>, List<Entity>> proteinReachableEntityDifference(Entity protein, Entity proteinNeighbor) {
+            List<Entity> reachable = entitiesWithinDistance(proteinNeighbor, null, proteinNeighborMaxDepth);
+            List<Entity> reachableWithoutProtein = entitiesWithinDistance(proteinNeighbor, protein, null, proteinNeighborMaxDepth);
+            return new Tuple<>(reachable, reachableWithoutProtein);
+        }
+
+        private int binarySearchForIndex(List<PathInfo> pathInfoList, Integer distance, boolean beginning) {
+            if (distance == null) {
+                return beginning ? 0 : pathInfoList.size() - 1;
+            }
+            PathInfo searchValue = new PathInfo(null, null, distance, null);
             int index = Collections.binarySearch(pathInfoList, searchValue, Comparator.comparingInt(PathInfo::distance));
             if (index >= 0) {
-                // Binary search will give an arbitrary value with this distance, need to find the last one
-                while (index < pathInfoList.size() - 1 && pathInfoList.get(index + 1).distance() == searchDistance) {
-                    index++;
+                if (beginning) {
+                    while (index > 0 && pathInfoList.get(index - 1).distance() == distance) {
+                        index--;
+                    }
+                } else {
+                    // Binary search will give an arbitrary value with this distance, need to find the last one
+                    while (index < pathInfoList.size() - 1 && pathInfoList.get(index + 1).distance() == distance) {
+                        index++;
+                    }
                 }
             }
-            // If we didn't find the number, it must be greater than everything that is within distance, return all reachable entities
-            List<PathInfo> pathInfos = index < 0 ? pathInfoList : pathInfoList.subList(0, index + 1);
-            return pathInfos.stream().map(PathInfo::from).toList();
+            return index;
         }
 
         public void generatePaths() {
-            timer.start(this);
-            for (Entity entity : grid.getEntitySet()) {
-                if (entity.getType().equals(EntityType.WALL)) {
-                    continue;
-                }
-                paths.put(entity, new HashMap<>());
-                sortedPaths.put(entity, new ArrayList<>());
-                generatePaths(entity);
-            }
-            timer.end(this);
+            timer.start("Pathing");
+            grid.getEntitySet().forEach(this::generatePaths);
+            timer.end("Pathing");
         }
 
-        private void generatePaths(Entity entity) {
-            Map<Entity, PathInfo> pathsForEntity = paths.get(entity);
-            pathsForEntity.clear();
-            pathsForEntity.put(entity, new PathInfo(entity, entity, 0, Collections.emptyList()));
+        public void generatePaths(Entity entity) {
+            if (entity.getType().equals(EntityType.WALL)) {
+                return;
+            }
+            Map<Entity, PathInfo> entityPathsMap = pathsMap.computeIfAbsent(entity, entity1 -> new HashMap<>());
+            List<PathInfo> entitySortedPaths = sortedPathsMap.computeIfAbsent(entity, entity1 -> new ArrayList<>());
+            generatePaths(entity, maxDepth, entityPathsMap, entitySortedPaths, null);
+            // Generate protein's neighbor paths given that the protein is impassable
+            if (entity.getType().isProtein()) {
+                for (Entity neighbor : entity.neighbors()) {
+                    if (!neighbor.getType().equals(EntityType.WALL) && !proteinNeighborPathsMap.containsKey(neighbor)) {
+                        EntityPair proteinNeighborPair = new EntityPair(entity, neighbor);
+                        entityPathsMap = proteinNeighborPathsMap.computeIfAbsent(proteinNeighborPair, entity1 -> new HashMap<>());
+                        entitySortedPaths = proteinNeighborSortedPathsMap.computeIfAbsent(proteinNeighborPair, entity1 -> new ArrayList<>());
+                        generatePaths(neighbor, proteinNeighborMaxDepth, entityPathsMap, entitySortedPaths, entity1 -> entity1 != entity);
+                    }
+                }
+            }
+        }
+
+        private void generatePaths(Entity entity, int maxDepth, Map<Entity, PathInfo> pathsMap, List<PathInfo> sortedPaths, Predicate<Entity> impassablePredicate) {
+            pathsMap.clear();
+            pathsMap.put(entity, new PathInfo(entity, entity, 0, Collections.emptyList()));
             int distance = 1;
             Queue<Entity> queue = new LinkedList<>(entity.neighbors());
+            boolean proteinImpassableGeneration = impassablePredicate != null;
             while (!queue.isEmpty()) {
                 int entitiesToProcess = queue.size();
                 for (int i = 0; i < entitiesToProcess; i++) {
-                    Entity from = queue.poll();
-                    if (pathsForEntity.get(from) != null || from.getType().equals(EntityType.WALL)) {
+                    Entity to = queue.poll();
+                    if (pathsMap.get(to) != null || to.getType().equals(EntityType.WALL) || (proteinImpassableGeneration && !impassablePredicate.test(to))) {
                         continue;
                     }
                     final int currentDistance = distance;
-                    List<Direction> directions = from.neighbors().stream()
+                    List<Direction> directions = to.neighbors().stream()
                             .filter(neighbor -> {
-                                PathInfo neighborPathInfo = pathsForEntity.get(neighbor);
+                                PathInfo neighborPathInfo = pathsMap.get(neighbor);
                                 return neighborPathInfo != null && neighborPathInfo.distance() == currentDistance - 1;
-                            }).map(from::directionTo)
+                            }).map(to::directionTo)
                             .toList();
                     if (!directions.isEmpty()) {
-                        pathsForEntity.put(from, new PathInfo(from, entity, distance, directions));
-                        for (Entity neighbor : from.neighbors()) {
-                            if (distance < maxDepth || neighbor.isInLineWith(entity)) {
+                        pathsMap.put(to, new PathInfo(to, entity, distance, directions));
+                        for (Entity neighbor : to.neighbors()) {
+                            if (distance < maxDepth || (!proteinImpassableGeneration && neighbor.isInLineWith(entity))) {
                                 queue.offer(neighbor);
                             }
                         }
@@ -210,11 +284,79 @@ class Player {
                 distance++;
             }
             // Remove the path to self with distance 0. I don't want this coming back in query results, saying there is no path to self should be fine.
-            pathsForEntity.remove(entity);
-            List<PathInfo> sortedPathList = sortedPaths.get(entity);
-            sortedPathList.clear();
-            sortedPathList.addAll(pathsForEntity.values());
-            sortedPathList.sort(Comparator.comparingInt(PathInfo::distance));
+            pathsMap.remove(entity);
+            sortedPaths.clear();
+            sortedPaths.addAll(pathsMap.values());
+            sortedPaths.sort(Comparator.comparingInt(PathInfo::distance));
+        }
+
+        /*
+            Find how far the middle point is from the enemy base
+            Find all points 4 more distance than that away
+            Put those entities into a set
+            Take each a step closer, put the results in a set
+            When the set has 3 items, record those with the distance
+            Same for 2 and 1
+         */
+        public void findChokePoints() {
+            Entity enemy = enemyRoots.get(0);
+            // If there are an even number of tile in one direction, get the "mid" point closer to the opponent
+            int midX = grid.getWidth() / 2 + (grid.getWidth() % 2 == 0 ? (enemy.getX() > grid.getWidth() / 2 ? 1 : 0) : 0);
+            int midY = grid.getHeight() / 2 + (grid.getHeight() % 2 == 0 ? (enemy.getY() > grid.getHeight() / 2 ? 1 : 0) : 0);
+            debugf("%s %s %s %s", grid.getWidth(), grid.getHeight(), midX, midY);
+            Entity middlePoint = grid.entityAt(midX, midY);
+            debug("Mid point: " + middlePoint);
+            int straightDistance = middlePoint.getStraightDistanceBetween(enemy);
+            Integer pathingDistance = pathing.distance(middlePoint, enemy);
+            debug("Straight distance: " + straightDistance);
+            debug("Pathing distance: " + (pathingDistance != null ? pathingDistance : "not reachable"));
+            int currentSearchDistance = straightDistance + 4;
+//            List<PathInfo> searchEntities = pathing.pathInfosWithinDistance(enemy, 0, currentSearchDistance);
+
+//            Set<Entity> seenEntities = new HashSet<>();
+//            Queue<SearchIndex> searchQueue = new LinkedList<>();
+//            searchEntities.forEach(pathInfo -> searchQueue.offer(new SearchIndex(pathInfo.from(), pathInfo.directions(), 0)));
+//            while(!searchQueue.isEmpty()) {
+//                for(int i = 0; i < searchQueue.size(); i++) {
+//                    SearchIndex searchIndex = searchQueue.poll();
+//                    if (searchIndex.index() != searchIndex.directions.size()) {
+//                        Entity nextEntity = searchIndex.entity().entityInDirection(searchIndex.directions.get(searchIndex.index()));
+//                        if(!seenEntities.add(nextEntity)) {
+//                            searchQueue.add(new SearchIndex(nextEntity, searchIndex.directions, searchIndex.index() + 1));
+//                        }
+//                    }
+//                }
+//            }
+//            currentSearchDistance--;
+//            debugf("%s entities found at distance %s", seenEntities.size(), currentSearchDistance);
+        }
+
+        public class Tuple<X, Y> {
+            public final X x;
+            public final Y y;
+
+            public Tuple(X x, Y y) {
+                this.x = x;
+                this.y = y;
+            }
+        }
+
+        private record SearchIndex(Entity entity, List<Direction> directions, int index) {
+        }
+
+        private record EntityPair(Entity protein, Entity neighbor) {
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (o == null || getClass() != o.getClass()) return false;
+                EntityPair that = (EntityPair) o;
+                return Objects.equals(protein, that.protein) && Objects.equals(neighbor, that.neighbor);
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hash(protein, neighbor);
+            }
         }
 
     }
@@ -506,6 +648,10 @@ class Player {
             return entities.stream();
         }
 
+        public int getStraightDistanceBetween(Entity other) {
+            return Math.abs(other.x - x) + Math.abs(other.y - y);
+        }
+
         public boolean isInLineWith(Entity other) {
             return x == other.getX() ^ y == other.getY();
         }
@@ -595,7 +741,7 @@ class Player {
                     .map(direction -> new BuildOption(entity.myNeighbor(rootId), direction, entity, null));
 
             BuildOption attackResult = buildableTilesByRootIdStream(rootId)
-                    .filter(entity -> pathing.entitiesWithinDistance(entity, 3).stream().anyMatch(Entity::enemy))
+                    .filter(entity -> pathing.entitiesWithinDistance(entity, null, 3).stream().anyMatch(Entity::enemy))
                     .flatMap(entityToDirectionTupleMapper)
                     .map(result -> new BuildOption(result.from(), result.direction(), result.to(), calculateAttackMerit(result.to(), result.direction())))
 //                    .peek(result -> debug(String.format("%.2f merit attacking at %s %s", result.merit(), result.to(), result.direction())))
@@ -667,7 +813,8 @@ class Player {
                     .filter(buildOption -> {
                         Entity pointedAt = buildOption.to().entityInDirection(buildOption.direction());
                         return pointedAt.getType().isProtein() && !pointedAt.isHarvestedByMe();
-                    }).map(buildOption -> new BuildOption(buildOption.from(), buildOption.direction(), buildOption.to(), getHarvesterExpandMeritResult(buildOption)))
+                    }).filter(Player.this::isProteinHarvestable)
+                    .map(buildOption -> new BuildOption(buildOption.from(), buildOption.direction(), buildOption.to(), getHarvesterExpandMeritResult(buildOption)))
                     .max(Comparator.comparingDouble(BuildOption::merit))
                     .orElse(null);
 
@@ -952,6 +1099,8 @@ class Player {
         public static final List<Double> NEW_HARVESTER_MERIT_BY_ENTITY_COUNT = Arrays.asList(8.0, 5.0);
         // Default merit count of harvesters of a protein type after the 2nd
         public static final double NEW_HARVESTER_DEFAULT_MERIT = 4.0;
+        // Short term solution (assuming I get around to fixing) - if this is a "closed" map and this protein only has two non-wall neighbors, likely shouldn't harvest it, should break through
+        public static final double NEW_HARVESTER_CLOSED_MAP_TWO_NEIGHBORS = -8;
         // Don't harvest near enemies
         public static final double NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY_MERIT = -5;
         // Prioritize building on tiles having a lower number of proteins they can harvest. If tile 1 can harvest an A or D and tile 2 can only harvest that same D,
@@ -1004,7 +1153,7 @@ class Player {
      */
     private double calculateRootMerit(Entity newRoot) {
         return buildRootMeritMap.computeIfAbsent(newRoot, entity ->
-                pathing.entitiesWithinDistance(newRoot, 3)
+                pathing.entitiesWithinDistance(newRoot, null, 3)
                         .stream()
                         .reduce(0.0, (meritSum, closeByEntity) -> getRootMeritFromNearbyTile(newRoot, closeByEntity) + meritSum, Double::sum)
                         + getRootMeritFromState(newRoot)
@@ -1058,6 +1207,19 @@ class Player {
         return (Math.max(0, threshold - count) / threshold) * (max - min) + min;
     }
 
+    // Return false if we should not be considering harvesting this protein because it blocks our progress too much
+    private boolean isProteinHarvestable(BuildOption buildOption) {
+        Entity protein = buildOption.to().entityInDirection(buildOption.direction());
+        Pathing.Tuple<List<Entity>, List<Entity>> reachableEntities = pathing.proteinReachableEntityDifference(protein, buildOption.to());
+        List<Entity> reachableWithProtein = reachableEntities.x;
+        List<Entity> reachableWithoutProtein = reachableEntities.y;
+        // If we can reach 70% of tiles without going through this protein, good enough for now to harvest
+        double reachabilityRation = .7;
+        boolean passReachabilityRation = ((double) reachableWithoutProtein.size() / reachableWithProtein.size()) > reachabilityRation;
+        debug(" [" + passReachabilityRation + "] Harvesting " + protein + " reachable from " + buildOption.to(), DebugCategory.HARVEST);
+        return passReachabilityRation;
+    }
+
     private double getHarvesterExpandMeritResult(BuildOption buildOption) {
         // Give merit based on how many harvesters we currently have of that type. With zero, give HARVESTER_MERIT[0], etc.
         List<Double> HARVESTER_MERIT_LIST = Merit.NEW_HARVESTER_MERIT_BY_ENTITY_COUNT;
@@ -1067,7 +1229,7 @@ class Player {
         double harvesterMerit = harvesterCount < HARVESTER_MERIT_LIST.size() ? HARVESTER_MERIT_LIST.get(harvesterCount) : Merit.NEW_HARVESTER_DEFAULT_MERIT;
         int proteinCount = getProteinCount(protein);
         double proteinMerit = linearlyScaledPercent(proteinCount, Merit.NEW_HARVESTER_PROTEIN_THRESHOLD, Merit.NEW_HARVESTER_MIN_PROTEIN_MERIT, Merit.NEW_HARVESTER_MAX_PROTEIN_MERIT);
-        double closeEnemyMerit = pathing.entitiesWithinDistance(proteinTarget, 2).stream()
+        double closeEnemyMerit = pathing.entitiesWithinDistance(proteinTarget, null, 2).stream()
                 .filter(Entity::enemy)
                 .count() * Merit.NEW_HARVESTER_PROTEIN_CLOSE_TO_ENEMY_MERIT;
         double harvestableProteinsMerit = buildOption.to().neighborsStream()
@@ -1077,7 +1239,8 @@ class Player {
         int nextTurnCProtein = myC + myHarvesterCountMap.get(EntityType.C) + (protein == EntityType.C ? 1 : 0) - 1;
         int nextTurnDProtein = myD + myHarvesterCountMap.get(EntityType.D) + (protein == EntityType.D ? 1 : 0) - 1;
         double noFutureHarvestersMerit = (nextTurnCProtein == 0 || nextTurnDProtein == 0) ? Merit.NEW_HARVESTER_NO_FUTURE_HARVESTERS : 0;
-        double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit + harvestableProteinsMerit + noFutureHarvestersMerit;
+        double closedMapMerit = (grid.isClosed() && buildOption.to().neighborsStream().filter(entity -> !entity.getType().equals(EntityType.WALL)).count() <= 2) ? Merit.NEW_HARVESTER_CLOSED_MAP_TWO_NEIGHBORS : 0;
+        double buildMerit = harvesterMerit + proteinMerit + closeEnemyMerit + harvestableProteinsMerit + noFutureHarvestersMerit + closedMapMerit;
 //        debug(String.format("%.2f merit building harvester on %s %s", buildMerit, protein, buildOption.to()));
 //        debug(String.format("\t %.2f from lack of harvesters", harvesterMerit));
 //        debug(String.format("\t %.2f from lack of protein", proteinMerit));
@@ -1088,7 +1251,7 @@ class Player {
 
     private double getRootMeritFromNearbyTile(Entity source, Entity closeByEntity) {
         Integer distance = pathing.distance(source, closeByEntity);
-        if(distance == null) {
+        if (distance == null) {
             return 0;
         }
         List<Double> meritByDistance = Merit.NEW_ROOT_MERIT_FROM_PROTEIN_BY_DISTANCE;
@@ -1111,7 +1274,7 @@ class Player {
         // Points for pointing at nearby enemies where the next direction is our attack direction
         // Points for enemies that are 1 or 2 spaces away?
         debug("Calculating attack merit for " + newTentacle + " " + buildDirection, DebugCategory.ATTACK);
-        double nearbyEnemyMerit = pathing.entitiesWithinDistance(newTentacle, 3).stream()
+        double nearbyEnemyMerit = pathing.entitiesWithinDistance(newTentacle, null, 3).stream()
                 .filter(Entity::enemy)
                 .mapToDouble(protein -> getNearbyEnemyAttackMerit(newTentacle, buildDirection, protein))
                 .sum();
@@ -1170,14 +1333,14 @@ class Player {
         double buildOnProteinMerit = newTentacle.getType().isProtein() ? Merit.NEW_ATTACKER_BUILD_ON_PROTEIN_MERIT : 0;
         double attackedByMeMerit = newTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_TILE_CONTROLED_MERIT : 0;
         double attackingControlledTileMerit = entityInFrontOfTentacle.isAttackedByMe() ? Merit.NEW_ATTACKER_ATTACKING_TILE_CONTROLLED_MERIT : 0;
-        if(buildOnProteinMerit != 0) {
-            debug(String.format("\t\t%.2f for building on protein", buildOnProteinMerit), DebugCategory.ATTACK);
+        if (buildOnProteinMerit != 0) {
+            debug(String.format("%.2f for building on protein", buildOnProteinMerit), DebugCategory.ATTACK, 1);
         }
-        if(attackedByMeMerit != 0) {
-            debug(String.format("\t\t%.2f for already controlling tile", attackedByMeMerit), DebugCategory.ATTACK);
+        if (attackedByMeMerit != 0) {
+            debug(String.format("%.2f for already controlling tile", attackedByMeMerit), DebugCategory.ATTACK, 1);
         }
-        if(buildOnProteinMerit != 0) {
-            debug(String.format("\t\t%.2f for attacking already controlled tile", attackingControlledTileMerit), DebugCategory.ATTACK);
+        if (buildOnProteinMerit != 0) {
+            debug(String.format("%.2f for attacking already controlled tile", attackingControlledTileMerit), DebugCategory.ATTACK, 1);
         }
         return buildOnProteinMerit + attackedByMeMerit + attackingControlledTileMerit;
     }
@@ -1198,6 +1361,7 @@ class Player {
         timer.start("Turn " + turn);
         debug("Start of turn " + turn);
         myRoots.clear();
+        enemyRoots.clear();
         entitiesById.clear();
         rootToDescendentsMap.clear();
         rootToBuildableAdjacentTilesMap.clear();
@@ -1259,13 +1423,30 @@ class Player {
         timer.end("Post Turn Load");
     }
 
+    private void firstTurn() {
+        int gridTiles = grid.width * grid.height;
+        // If the grid is at least 1/5 walls, it is 'closed'
+        long wallCount = grid.getEntitySet().stream().filter(entity -> entity.getType().equals(EntityType.WALL)).count();
+        debug("Wall count: " + wallCount);
+        double wallCountRatioNeededForClosedMap = 5.5;
+        boolean closedMap = wallCount > gridTiles / wallCountRatioNeededForClosedMap;
+        grid.setClosed(closedMap);
+        debug("Map is " + (grid.isClosed() ? "CLOSED" : "OPEN"));
+        pathing.generatePaths();
+        behaviors.addAll(goldLeagueBehaviors());
+        if (closedMap) {
+//            pathing.findChokePoints();
+        }
+    }
+
     private void start() {
         Scanner in = new Scanner(System.in);
         int width = in.nextInt(); // columns in the game grid
         int height = in.nextInt(); // rows in the game grid
 
         grid = new Grid(width, height);
-        pathing = new Pathing(10);
+        // Calculate pathing a little over half the map
+        pathing = new Pathing((grid.getWidth() + grid.getHeight()) / 2 + 4);
 
         // game loop
         while (true) {
@@ -1286,6 +1467,8 @@ class Player {
                 if (entityType.equals(EntityType.ROOT)) {
                     if (entity.mine()) {
                         myRoots.add(entity);
+                    } else {
+                        enemyRoots.add(entity);
                     }
                 }
                 entity.setId(in.nextInt()); // id of this entity if it's an organ, 0 otherwise
@@ -1302,20 +1485,24 @@ class Player {
             myB = in.nextInt();
             myC = in.nextInt();
             myD = in.nextInt();
-            enemyA = in.nextInt();
-            enemyB = in.nextInt();
-            enemyC = in.nextInt();
-            enemyD = in.nextInt();
+            int enemyA = in.nextInt();
+            int enemyB = in.nextInt();
+            int enemyC = in.nextInt();
+            int enemyD = in.nextInt();
+
 
             int requiredActionsCount = in.nextInt(); // your number of organisms, output an action for each one in any order
 
             postTurnLoad();
 
             if (turn == 1) {
-                pathing.generatePaths();
-                behaviors.addAll(goldLeagueBehaviors());
+                firstTurn();
             }
 
+            boolean shortCircuitGame = true;
+            if (turn == 5 && shortCircuitGame) {
+                throw new RuntimeException("Short circuit game for testing");
+            }
             List<String> commandText = getCommands(requiredActionsCount).stream()
                     .map(Command::getText)
                     .toList();
@@ -1328,14 +1515,20 @@ class Player {
     enum DebugCategory {
         GENERAL,
         ATTACK,
+        HARVEST,
         TIMER
     }
 
     Map<DebugCategory, Boolean> debugCategoryMap = Map.of(
             DebugCategory.GENERAL, true,
             DebugCategory.ATTACK, false,
+            DebugCategory.HARVEST, true,
             DebugCategory.TIMER, false
     );
+
+    private void debugf(Object message, Object... args) {
+        debug(String.format(message.toString(), args));
+    }
 
     private void debug(Object message) {
         debug(message, DebugCategory.GENERAL);
@@ -1346,10 +1539,13 @@ class Player {
     }
 
     private void debug(Object message, DebugCategory category, int indentionLevel) {
+        if (message == null) {
+            message = "null";
+        }
         boolean print = debugCategoryMap.get(category);
         String indent = "";
         if (print) {
-            if(indentionLevel > 0) {
+            if (indentionLevel > 0) {
                 message = String.join("", Collections.nCopies(indentionLevel, "  ")) + message;
             }
             if (currentRootId != null) {
