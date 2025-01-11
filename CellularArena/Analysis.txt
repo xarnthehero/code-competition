@@ -38,18 +38,9 @@ Large plentiful map
 
 
 Current Top Things To Work On:
-    Closed map strategy:
-        Give protein a harvest value depending on how likely it is we can harvest it
-[Done]            In a closed map, for each protein, also get path info about cells within 8? distance given that the protein is impassable.
-                This will let us check 2 things:
-                    1) Can we reach one neighbor of the protein from another, meaning we can go around
-                    2) If it is a pocket to the end of the map (no tile at distance 8) which we can expand to at a low priority
-        If a protein is stopping us from getting to a majority of the map, low value (negative?)
-            This is the case when:
-                The number of reachable tiles is much lower when this protein is blocking expansion
-                AND we don't have an entity close to those unreachable tiles
-    Negative merit for building on a harvested protein - incorporate in all flows
-        This should make WAIT better than expand typically when expanding on needed proteins
+    Cache merit calculation for sporing / new root - it is taking a lot of my turn
+    Fewer points from sporing than creating a root - hurts to build a sporer early game, then another next turn
+
 
 
 
