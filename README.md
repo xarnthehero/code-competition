@@ -51,6 +51,7 @@ Many of my final submission losses were due to turn 1 or 2 timeouts on large map
 I ended at 298th place with 3,900 total entries.
 
 <h3>Observations and Challenges</h3>
+
 - Kept code well organized, although next time I'll code in multiple files and class combiner
     - Java example - https://github.com/wala-fr/CodingameFramework
 - Garbage collection is a killer, reinforced by the fact that the top 14 entries are all C++
