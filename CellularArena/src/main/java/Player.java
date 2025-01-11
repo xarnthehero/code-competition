@@ -1341,7 +1341,7 @@ class Player {
 
     private void debugMerit(String message, double merit, DebugCategory category, int indentLevel) {
         if(merit != 0) {
-//            debug(message, category, indentLevel);
+            debug(message, category, indentLevel);
         }
     }
 
